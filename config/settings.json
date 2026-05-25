@@ -1,0 +1,5 @@
+{
+  "simulation_mode": true,
+  "telegram_alerts": true,
+  "logging_enabled": true
+}
