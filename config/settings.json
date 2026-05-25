@@ -1,5 +1,6 @@
 {
   "simulation_mode": true,
   "telegram_alerts": true,
-  "logging_enabled": true
+  "logging_enabled": true,
+  "architecture_doc_path": "/home/digil/Downloads/OpenClaw Technical Architecture Document.txt"
 }

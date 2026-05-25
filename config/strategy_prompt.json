@@ -1,0 +1,6 @@
+{
+  "timeframe": "15 min",
+  "direction_logic": "5 EMA crossing above 20 EMA → CE only; 5 EMA crossing below 20 EMA → PE only",
+  "confirmation": "3 min premium chart confirmation before signal",
+  "instrument": "ATM option (dynamic)"
+}

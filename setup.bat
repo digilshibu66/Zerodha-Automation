@@ -1,9 +1,2 @@
 @echo off
-
-echo Installing project dependencies...
-
-pip install -r requirements.txt
-
-echo.
-echo Setup Completed Successfully
-pause
+powershell -ExecutionPolicy Bypass -NoProfile -File "%~dp0setup.ps1"
