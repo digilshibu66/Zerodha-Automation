@@ -1,17 +1,17 @@
-import json
 import logging
 import signal
-import sys
-from datetime import datetime
+import json
 
-from browser_monitor import chrome_running
 from telegram_manager import send_message
-from zerodha_monitor import check_zerodha_open
-from openclaw_manager import prepare_prompt, launch_openclaw, stop_openclaw, is_openclaw_running
+from openclaw_manager import (
+    prepare_prompt,
+    configure_openclaw,
+    run_openclaw_agent,
+    stop_openclaw,
+)
 from strategy_engine import run_strategy_cycle
 
 SETTINGS_FILE = "config/settings.json"
-STRATEGY_FILE = "config/strategy_prompt.json"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,60 +25,51 @@ def load_config():
         return json.load(f)
 
 
-def read_architecture_doc(path):
-    try:
-        with open(path) as f:
-            content = f.read()
-        logger.info("Architecture document loaded (%d bytes)", len(content))
-        return content
-    except Exception as e:
-        logger.warning("Could not read architecture doc '%s': %s", path, e)
-        return None
-
-
 def main():
     settings = load_config()
     simulation = settings.get("simulation_mode", True)
-    arch_doc_path = settings.get("architecture_doc_path", None)
 
-    logger.info("Trading Automation Bot - Phase 2")
+    logger.info("Trading Automation Bot")
     logger.info("Simulation mode: %s", simulation)
-    send_message("Trading Automation Bot starting (Phase 2)")
+    send_message("Trading Automation Bot starting")
 
-    chrome_ok = chrome_running()
-    if chrome_ok:
-        logger.info("Chrome is running")
-        send_message("Chrome detected")
-    else:
-        logger.warning("Chrome is NOT running. Continuing anyway (some features may not work).")
-        send_message("Warning: Chrome not detected")
+    prepare_prompt()
+    logger.info("Strategy prompt prepared")
 
-    zerodha_ok = check_zerodha_open()
-    if zerodha_ok:
-        logger.info("Zerodha login confirmed")
-        send_message("Zerodha login is done. Proceeding with setup...")
-    else:
-        logger.warning("No Zerodha/Kite window found. Verify you are logged in.")
-        send_message("Warning: Zerodha login not detected. Please login and restart.")
+    openclaw_ok = configure_openclaw()
+    if not openclaw_ok:
+        logger.warning("OpenClaw not configured")
+        send_message("OpenClaw not configured — cannot continue")
         return
 
-    prompt_path = prepare_prompt(chrome_ok=chrome_ok, zerodha_ok=zerodha_ok)
-    logger.info("Strategy prompt prepared at: %s", prompt_path)
+    logger.info("Launching OpenClaw agent — it will handle Chrome, login, and Telegram")
+    send_message("OpenClaw agent starting — it will handle Chrome, login check, and monitoring")
 
-    if arch_doc_path:
-        doc = read_architecture_doc(arch_doc_path)
-        if doc:
-            logger.info("Architecture reference loaded for strategy context")
+    result = run_openclaw_agent(
+        "You are an automated intraday options trading agent for Zerodha. "
+        "All trades are simulated. "
+        "Read the full strategy from prompts/strategy_prompt.txt using 'cat prompts/strategy_prompt.txt'. "
+        "Execute the strategy step by step using bash commands. "
+        "Launch Chrome with CDP, navigate to Kite, check login, send Telegram messages. "
+        "Once logged in, start monitoring the market using the strategy rules. "
+        "Send Telegram alerts for every event.",
+        timeout_seconds=180,
+    )
 
-    openclaw_ok = launch_openclaw()
-    if openclaw_ok:
-        logger.info("OpenClaw launched successfully")
-        send_message("OpenClaw engine started")
+    if result:
+        stdout, stderr, code = result
+        if code == 0:
+            logger.info("OpenClaw agent completed")
+            send_message("OpenClaw agent completed successfully")
+        else:
+            logger.warning("OpenClaw agent finished with code %d", code)
+            send_message("OpenClaw agent finished (check logs)")
     else:
-        logger.warning("Running in simulation-only mode (OpenClaw not available)")
-        send_message("Running in simulation-only mode")
+        logger.warning("OpenClaw agent failed to launch")
+        send_message("OpenClaw agent failed to launch")
 
-    send_message("Bot fully operational. Monitoring markets...")
+    logger.info("Starting strategy engine for ongoing monitoring...")
+    send_message("Starting market monitoring...")
 
     try:
         run_strategy_cycle(cycles=None, interval=60)
@@ -86,8 +77,7 @@ def main():
         logger.info("Received shutdown signal")
         send_message("Bot shutting down...")
     finally:
-        if is_openclaw_running():
-            stop_openclaw()
+        stop_openclaw()
         logger.info("Bot stopped")
         send_message("Bot stopped")
 

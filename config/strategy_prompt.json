@@ -1,6 +1,40 @@
 {
-  "timeframe": "15 min",
-  "direction_logic": "5 EMA crossing above 20 EMA → CE only; 5 EMA crossing below 20 EMA → PE only",
-  "confirmation": "3 min premium chart confirmation before signal",
-  "instrument": "ATM option (dynamic)"
+  "strategy_type": "Intraday ATM Options Buying",
+  "direction": {
+    "timeframe": "15 min",
+    "indicators": ["5 EMA", "20 EMA"],
+    "rules": {
+      "CE": "5 EMA crosses ABOVE 20 EMA on 15m chart → Enable ONLY CE trades",
+      "PE": "5 EMA crosses BELOW 20 EMA on 15m chart → Enable ONLY PE trades"
+    }
+  },
+  "strike_selection": {
+    "type": "ATM",
+    "rule": "If CE bias → Buy ATM CE; If PE bias → Buy ATM PE",
+    "note": "ATM strike dynamically updates based on current underlying spot price"
+  },
+  "entry": {
+    "timeframe": "3 min",
+    "indicators": ["5 EMA", "20 EMA"],
+    "conditions": {
+      "CE": ["15m direction = Bullish", "ATM CE premium 5 EMA crosses ABOVE 20 EMA", "Current time inside allowed session", "Trade count limit not exceeded", "No active position running"],
+      "PE": ["15m direction = Bearish", "ATM PE premium 5 EMA crosses BELOW 20 EMA", "Current time inside allowed session", "Trade count limit not exceeded", "No active position running"]
+    }
+  },
+  "capital": { "usage": "100% of available capital per trade", "quantity": "Maximum possible lots using available margin, multiple lots allowed" },
+  "risk_management": { "max_loss_per_trade": "10% of deployed capital", "example": "If capital = ₹20,000, max loss = ₹2,000" },
+  "reward_target": { "min": "20% of deployed capital", "max": "50% of deployed capital", "configurable": true },
+  "stop_loss": { "type": "EMA based", "indicator": "20 EMA of 3-minute premium chart", "condition": "Exit if premium price touches/closes beyond 20 EMA against trade direction" },
+  "sessions": [
+    { "name": "Morning", "start": "09:30", "end": "11:30", "max_trades": 2 },
+    { "name": "Afternoon", "start": "13:00", "end": "15:00", "max_trades": 2 }
+  ],
+  "daily_limit": { "max_trades": 4, "rule": "After 4 completed trades, block all new entries" },
+  "exit_conditions": ["Profit target hit (20%-50% of deployed capital)", "EMA stop loss hit (price crosses 20 EMA on 3m premium chart)", "Hard risk stop hit (loss reaches 10% of deployed capital)"],
+  "position_management": { "max_active": 1, "rules": ["Only ONE active trade at a time", "No averaging", "No hedging", "No reverse entry without fresh signal", "Wait for fresh EMA crossover after exit"] },
+  "auto_square_off": { "time": "15:15", "rule": "Exit all open positions before market close" },
+  "safety": ["Duplicate order prevention", "API failure handling", "Internet reconnect handling", "Manual emergency stop", "Trade execution confirmation check"],
+  "alerts": ["Trade entry", "Trade exit", "SL hit", "Target hit", "Session limit reached", "Daily trade limit reached", "API/order failure"],
+  "logging": ["Entry time", "Exit time", "Direction (CE/PE)", "Strike selected", "Lot quantity", "Entry price", "Exit price", "P&L", "Exit reason", "Trade duration"],
+  "flow": ["15m EMA Direction Check", "Determine CE or PE Bias", "Select ATM Option Premium", "Monitor 3m EMA Crossover", "Validate: Session timing, Trade count, No active trade", "Deploy 100% available capital", "Execute Buy Order", "Monitor: Target, 20 EMA SL, Hard SL", "Exit Trade", "Update Logs & Trade Count", "Wait For Fresh Signal"]
 }

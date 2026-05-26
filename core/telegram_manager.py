@@ -17,5 +17,3 @@ def send_message(message):
     }
 
     requests.post(url, data=payload)
-
-send_message("✅ Trading Automation Bot Started")

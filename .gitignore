@@ -7,3 +7,5 @@ venv/
 logs/
 prompts/
 .env
+config/telegram.json
+config/openclaw_model.json

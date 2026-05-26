@@ -249,11 +249,30 @@ if (Test-Path $venvActivate) {
     }
 }
 
-Info "Installing Python dependencies..."
+$venvPython = Join-Path $scriptDir "venv\Scripts\python.exe"
 $pip = Join-Path $scriptDir "venv\Scripts\pip.exe"
-& $pip install --upgrade pip -q 2>$null
-& $pip install -r requirements.txt -q
-if ($LASTEXITCODE -eq 0) { Ok "Python dependencies installed" } else { Fail "pip install failed"; exit 1 }
+
+$depsCheck = & $venvPython -c "import requests, psutil, pygetwindow" 2>&1
+if ($LASTEXITCODE -eq 0) {
+    Ok "Python dependencies already installed"
+} else {
+    Info "Installing Python dependencies..."
+    & $pip install --upgrade pip -q 2>$null
+    & $pip install -r requirements.txt -q
+    if ($LASTEXITCODE -eq 0) { Ok "Python dependencies installed" } else { Fail "pip install failed"; exit 1 }
+}
+
+# Install Playwright Chromium for Chrome tab inspection (cross-platform CDP detection)
+$pwCheck = & $venvPython -c "import playwright" 2>&1
+if ($LASTEXITCODE -eq 0) {
+    Ok "Playwright already installed"
+} else {
+    Info "Installing Playwright and Chromium..."
+    & $pip install playwright -q 2>$null
+    & $venvPython -m playwright install chromium 2>&1 | Out-Null
+    $pwOk = & $venvPython -c "import playwright" 2>&1
+    if ($LASTEXITCODE -eq 0) { Ok "Playwright Chromium installed" } else { Warn "Playwright browser install skipped (not critical)" }
+}
 Write-Host ""
 
 # ------------------------------------------------------------------
@@ -261,18 +280,37 @@ Write-Host ""
 # ------------------------------------------------------------------
 Section "OpenClaw"
 
+# Try running openclaw first (works if already in PATH)
+$ocReady = $false
 try {
-    $ocVer = & openclaw --version 2>&1
-    if ($LASTEXITCODE -eq 0) {
-        Ok "OpenClaw already installed ($ocVer)"
-    } else { throw }
-} catch {
-    Info "Installing OpenClaw via npm..."
-    # On Windows, npm global prefix defaults to $env:APPDATA\npm which is user-writable
-    $npmPrefix = & npm config get prefix
-    $npmBin = Join-Path $npmPrefix "openclaw.cmd"
-    $npmBin2 = Join-Path $npmPrefix "openclaw"
+    $null = & openclaw --version 2>&1
+    if ($LASTEXITCODE -eq 0) { $ocReady = $true }
+} catch {}
 
+if (-not $ocReady) {
+    $npmPrefix = & npm config get prefix
+    $searchPaths = @(
+        "$npmPrefix\openclaw.cmd", "$npmPrefix\openclaw"
+        "$env:LOCALAPPDATA\npm\openclaw.cmd", "$env:LOCALAPPDATA\npm\openclaw"
+        "$env:ProgramFiles\nodejs\openclaw.cmd", "$env:ProgramFiles\nodejs\openclaw"
+    )
+    foreach ($p in $searchPaths) {
+        if (Test-Path $p) {
+            $dir = Split-Path $p -Parent
+            $env:Path = "$dir;$env:Path"
+            try {
+                $null = & openclaw --version 2>&1
+                if ($LASTEXITCODE -eq 0) { $ocReady = $true; break }
+            } catch {}
+        }
+    }
+}
+
+if ($ocReady) {
+    $ocVer = & openclaw --version 2>&1
+    Ok "OpenClaw already installed ($ocVer)"
+} else {
+    Info "Installing OpenClaw via npm..."
     try {
         & npm install -g openclaw 2>&1 | Out-Null
         if ($LASTEXITCODE -eq 0) {
@@ -292,6 +330,17 @@ try {
         }
     }
 }
+
+# Ensure OpenClaw global config is valid (set gateway.mode local)
+try {
+    $null = & openclaw --version 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        $ocValidate = & openclaw config validate 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            & openclaw config set gateway.mode local 2>&1 | Out-Null
+        }
+    }
+} catch {}
 Write-Host ""
 
 # ------------------------------------------------------------------
@@ -357,18 +406,119 @@ Write-Host ""
 Section "Strategy prompt"
 
 $strategyConfig = "config\strategy_prompt.json"
-$strategy = @{
-    timeframe    = "15 min"
-    direction_logic = "5 EMA crossing above 20 EMA → CE only; 5 EMA crossing below 20 EMA → PE only"
-    confirmation = "3 min premium chart confirmation before signal"
-    instrument   = "ATM option (dynamic)"
+if ((Test-Path $strategyConfig) -and ((Get-Item $strategyConfig).Length -gt 0)) {
+    Ok "Strategy prompt already exists at $strategyConfig"
+} else {
+    @{
+        strategy_type = "Intraday ATM Options Buying"
+        direction = @{
+            timeframe = "15 min"
+            indicators = @("5 EMA", "20 EMA")
+            rules = @{
+                CE = "5 EMA crosses ABOVE 20 EMA on 15m chart → Enable ONLY CE trades"
+                PE = "5 EMA crosses BELOW 20 EMA on 15m chart → Enable ONLY PE trades"
+            }
+        }
+        strike_selection = @{
+            type = "ATM"
+            rule = "If CE bias → Buy ATM CE; If PE bias → Buy ATM PE"
+            note = "ATM strike dynamically updates based on current underlying spot price"
+        }
+        entry = @{
+            timeframe = "3 min"
+            indicators = @("5 EMA", "20 EMA")
+            conditions = @{
+                CE = @("15m direction = Bullish", "ATM CE premium 5 EMA crosses ABOVE 20 EMA", "Current time inside allowed session", "Trade count limit not exceeded", "No active position running")
+                PE = @("15m direction = Bearish", "ATM PE premium 5 EMA crosses BELOW 20 EMA", "Current time inside allowed session", "Trade count limit not exceeded", "No active position running")
+            }
+        }
+        capital = @{ usage = "100% of available capital per trade"; quantity = "Maximum possible lots using available margin, multiple lots allowed" }
+        risk_management = @{ max_loss_per_trade = "10% of deployed capital"; example = "If capital = ₹20,000, max loss = ₹2,000" }
+        reward_target = @{ min = "20% of deployed capital"; max = "50% of deployed capital"; configurable = $true }
+        stop_loss = @{ type = "EMA based"; indicator = "20 EMA of 3-minute premium chart"; condition = "Exit if premium price touches/closes beyond 20 EMA against trade direction" }
+        sessions = @(
+            @{ name = "Morning"; start = "09:30"; end = "11:30"; max_trades = 2 }
+            @{ name = "Afternoon"; start = "13:00"; end = "15:00"; max_trades = 2 }
+        )
+        daily_limit = @{ max_trades = 4; rule = "After 4 completed trades, block all new entries" }
+        exit_conditions = @("Profit target hit (20%-50% of deployed capital)", "EMA stop loss hit (price crosses 20 EMA on 3m premium chart)", "Hard risk stop hit (loss reaches 10% of deployed capital)")
+        position_management = @{ max_active = 1; rules = @("Only ONE active trade at a time", "No averaging", "No hedging", "No reverse entry without fresh signal", "Wait for fresh EMA crossover after exit") }
+        auto_square_off = @{ time = "15:15"; rule = "Exit all open positions before market close" }
+        safety = @("Duplicate order prevention", "API failure handling", "Internet reconnect handling", "Manual emergency stop", "Trade execution confirmation check")
+        alerts = @("Trade entry", "Trade exit", "SL hit", "Target hit", "Session limit reached", "Daily trade limit reached", "API/order failure")
+        logging = @("Entry time", "Exit time", "Direction (CE/PE)", "Strike selected", "Lot quantity", "Entry price", "Exit price", "P&L", "Exit reason", "Trade duration")
+        flow = @("15m EMA Direction Check", "Determine CE or PE Bias", "Select ATM Option Premium", "Monitor 3m EMA Crossover", "Validate: Session timing, Trade count, No active trade", "Deploy 100% available capital", "Execute Buy Order", "Monitor: Target, 20 EMA SL, Hard SL", "Exit Trade", "Update Logs & Trade Count", "Wait For Fresh Signal")
+    } | ConvertTo-Json -Depth 5 | Set-Content $strategyConfig -Encoding UTF8
+    Ok "Strategy prompt saved to $strategyConfig"
 }
-$strategy | ConvertTo-Json | Set-Content $strategyConfig -Encoding UTF8
-Ok "Strategy prompt saved to $strategyConfig"
 Write-Host ""
 
 # ------------------------------------------------------------------
-# Step 9 — Validation summary
+# Step 9 — Configure OpenClaw model
+# ------------------------------------------------------------------
+Section "OpenClaw Model Configuration"
+
+$modelConfig = "config\openclaw_model.json"
+$openclawDir = "$env:USERPROFILE\.openclaw"
+$ocGlobalConfig = "$openclawDir\openclaw.json"
+
+$hasModelConfig = (Test-Path $modelConfig) -and ((Get-Item $modelConfig).Length -gt 0)
+$hasRealApiKey = $false
+if ($hasModelConfig) {
+    $content = Get-Content $modelConfig -Raw
+    $hasRealApiKey = ($content -notmatch "YOUR_API_KEY")
+}
+if ($hasModelConfig -and $hasRealApiKey) {
+    Ok "OpenClaw model config already exists"
+} else {
+    Write-Host ""
+    Write-Host "--- AI Model Selection ---" -ForegroundColor Cyan
+    Write-Host "Select provider for OpenClaw:" -ForegroundColor White
+    Write-Host "  1) OpenAI"
+    Write-Host "  2) OpenRouter"
+    Write-Host "  3) Anthropic"
+    Write-Host "  4) Google Gemini"
+    Write-Host "  5) Other"
+    $modelChoice = Read-Host "Choice [1]"
+    if ([string]::IsNullOrWhiteSpace($modelChoice)) { $modelChoice = "1" }
+
+    switch ($modelChoice) {
+        "1" { $provider = "openai"; $defaultModel = "gpt-4o" }
+        "2" { $provider = "openrouter"; $defaultModel = "openrouter/auto" }
+        "3" { $provider = "anthropic"; $defaultModel = "claude-sonnet-4-20250514" }
+        "4" { $provider = "google"; $defaultModel = "gemini-2.5-pro" }
+        "5" { $provider = "custom"; $defaultModel = "" }
+    }
+
+    if ($provider -ne "custom") {
+        $modelName = Read-Host "Model [$defaultModel]"
+        if ([string]::IsNullOrWhiteSpace($modelName)) { $modelName = $defaultModel }
+    } else {
+        $provider = Read-Host "Provider identifier (e.g. openai, openrouter)"
+        $modelName = Read-Host "Model name"
+    }
+
+    $apiKey = Read-Host "API key (leave blank to set later)"
+
+    @{ provider = $provider; model = $modelName; api_key = $(if ($apiKey) { $apiKey } else { "YOUR_API_KEY" }) } |
+        ConvertTo-Json | Set-Content $modelConfig -Encoding UTF8
+    Ok "Model config saved to $modelConfig"
+
+    if ($apiKey) {
+        $envVarName = switch ($provider) {
+            "openai"    { "OPENAI_API_KEY" }
+            "openrouter" { "OPENROUTER_API_KEY" }
+            "anthropic"  { "ANTHROPIC_API_KEY" }
+            default     { "${provider}_API_KEY".ToUpper() }
+        }
+        [Environment]::SetEnvironmentVariable($envVarName, $apiKey, "User")
+        Ok "API key saved as environment variable: $envVarName"
+    }
+}
+Write-Host ""
+
+# ------------------------------------------------------------------
+# Step 10 — Validation summary
 # ------------------------------------------------------------------
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host " Setup Complete - Validation Summary" -ForegroundColor Cyan
@@ -403,6 +553,8 @@ Check "Telegram config exists"       { (Test-Path "config\telegram.json") -and (
 Check "Strategy prompt exists"       { (Test-Path "config\strategy_prompt.json") -and ((Get-Item "config\strategy_prompt.json").Length -gt 0) }
 Check "Zerodha config exists"        { Test-Path "config\zerodha.json" }
 Check "Settings config exists"       { Test-Path "config\settings.json" }
+Check "OpenClaw model config exists"  { Test-Path "config\openclaw_model.json" }
+Check "Playwright Chromium installed"  { & "venv\Scripts\python.exe" -c "import playwright" 2>$null; $LASTEXITCODE -eq 0 }
 
 Write-Host ""
 Write-Host "  $passed passed, $failed failed" -ForegroundColor $(if ($failed -eq 0) { "Green" } else { "Yellow" })

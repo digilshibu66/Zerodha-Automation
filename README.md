@@ -9,7 +9,7 @@ OpenClaw-based automated intraday options monitoring and dummy trade simulation 
 ## Pipeline
 
 ```
-Launcher → Chrome check → Zerodha check → Prompt prep → OpenClaw launch → Strategy loop → Telegram alerts → Cleanup
+Launcher → Chrome check → Zerodha check → Prompt prep → OpenClaw launch → Strategy engine loop → Telegram alerts → Cleanup
 ```
 
 Every step sends a Telegram notification so you know the bot's status in real time.
@@ -43,7 +43,7 @@ run_bot.bat
 ./run_bot.sh
 ```
 
-`setup.bat` / `setup.sh` will install everything: Python venv, dependencies, OpenClaw, and prompt you for Telegram credentials.
+`setup.bat` / `setup.sh` installs everything: Python venv, dependencies, OpenClaw, and prompts for Telegram credentials.
 
 ---
 
@@ -56,10 +56,10 @@ git clone <repo-url>
 cd TRADING-AUTOMATION
 ```
 
-Then run the setup script for your platform (above). The setup will:
+Run the setup script for your platform. It will:
 - Check for Python 3.8+, Node.js 22+, npm, and Chrome
 - Create a Python virtual environment (`venv/`)
-- Install Python dependencies (`requests`, `psutil`, `pygetwindow`, etc.)
+- Install Python dependencies
 - Install OpenClaw globally via npm
 - Create `logs/` and `prompts/` directories
 - Prompt for Telegram bot configuration
@@ -70,11 +70,11 @@ Then run the setup script for your platform (above). The setup will:
 
 The bot sends alerts to a Telegram group. During setup you'll need:
 
-1. **Create a bot** — Open Telegram, search `@BotFather`, send `/newbot`, and save the `bot_token`
+1. **Create a bot** — Open Telegram, search `@BotFather`, send `/newbot`, save the `bot_token`
 2. **Create a group** — New Group in Telegram, add your bot as a member
-3. **Send a test message** in the group (any text)
+3. **Send a test message** in the group
 4. **Get the group chat_id** — either:
-   - Add `@getidsbot` to the group (it will reply with the ID)
+   - Add `@getidsbot` to the group (it replies with the ID)
    - Or visit `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates` after sending a message and look for `"chat":{"id":-100...}` (the negative number is your group chat_id)
 
 ### Step 3 — Run the Bot
@@ -87,15 +87,145 @@ run_bot.bat
 ./run_bot.sh
 ```
 
-The bot will:
-1. Check Chrome is running
-2. Verify a Zerodha/Kite window is open
-3. Prepare the strategy prompt and save it to `prompts/`
-4. Launch OpenClaw with the prompt (falls back to simulation-only mode if OpenClaw isn't available)
-5. Read the architecture document (optional, path set in `config/settings.json`)
-6. Run the monitoring strategy loop
-7. Send Telegram alerts for every stage
-8. Clean up OpenClaw on exit
+---
+
+## Full Workflow
+
+### 1. Launch
+
+`run_bot.bat` / `run_bot.sh` activates the Python virtual environment and runs `core/runtime.py`.
+
+### 2. Startup Checks
+
+| Step | What happens | Telegram alert |
+|---|---|---|
+| Load settings | Reads `config/settings.json` for simulation mode, alerts, arch doc path | "Bot starting" |
+| Chrome check | `psutil` scans running processes for "chrome" | "Chrome detected" or warning |
+| Zerodha check | `pygetwindow` looks for a window titled "Kite" or "Zerodha" | "Zerodha login is done" or warning + bot exits |
+
+If Zerodha is not detected, the bot stops immediately — no trading without a logged-in session.
+
+### 3. Prompt Preparation
+
+Reads `config/strategy_prompt.json` (the full 16-section strategy) and writes a 145-line prompt to `prompts/strategy_prompt.txt`. The prompt includes:
+- Live environment status (Chrome/Zerodha state fed from startup checks)
+- All strategy rules (direction logic, entry conditions, sessions, risk, targets, SL, exits)
+- Operating instructions for the two session windows
+
+If `architecture_doc_path` is set in `settings.json`, that document is also loaded into context.
+
+### 4. OpenClaw Launch
+
+Tries `openclaw --prompt prompts/strategy_prompt.txt`:
+
+- **OpenClaw installed** → subprocess starts with the full strategy prompt
+- **Not installed** → logs a warning and continues in simulation-only mode
+
+### 5. Strategy Engine Loop
+
+`run_strategy_cycle()` runs continuously (every 30 seconds by default) and follows this decision flow:
+
+```
+Every 30s cycle:
+  │
+  ├── Check: daily trade count < 4?
+  │     If not → STOP, send Telegram "Daily limit reached"
+  │
+  ├── Simulate 15m EMA direction → CE or PE bias
+  │
+  ├── Check: inside a session window?
+  │     ├── Morning:   09:30 - 11:30  (max 2 trades)
+  │     └── Afternoon: 13:00 - 15:00  (max 2 trades)
+  │     └── Outside both → sleep, skip
+  │
+  ├── Check: session trade count < session max?
+  │     └── If session limit hit → Telegram "Session limit reached", skip
+  │
+  ├── Simulate 3m EMA crossover → entry confirmed?
+  │     └── If not confirmed → sleep, skip
+  │
+  ├── Check: no active trade already running
+  │
+  ├── ENTER TRADE
+  │     ├── Direction: CE/PE (from 15m)
+  │     ├── Strike: ATM
+  │     ├── Capital: 100% deployed
+  │     ├── Lots: 1-3 (simulated)
+  │     ├── Telegram: "Trade entry: CE ATM | 2 lot(s) @ 145.50"
+  │     └── Log to file
+  │
+  ├── MONITOR POSITION (3-6 monitor cycles)
+  │     └── Simulate exit reason: target / SL / hard SL
+  │
+  ├── EXIT TRADE
+  │     ├── P&L: target = +20-50%, SL = 0 to -10%, hard SL = -10%
+  │     ├── Telegram: "Trade exit: CE | P&L: +4500 | Reason: target"
+  │     ├── Log: entry/exit time, direction, strike, lots, prices, P&L, reason, duration
+  │     └── trade_count++
+  │
+  └── Sleep 30s, repeat
+```
+
+### 6. Shutdown
+
+Press Ctrl+C or the bot catches `KeyboardInterrupt`:
+
+- Stops OpenClaw gracefully (SIGTERM → kill if unresponsive)
+- Telegram: "Bot stopped"
+- Final summary logged with trade count and total P&L
+
+---
+
+## Trading Sessions
+
+| Time | Session | Max Trades |
+|---|---|---|
+| Before 09:30 | — | Bot waits |
+| 09:30 - 11:30 | **Morning** | 2 trades max |
+| 11:30 - 13:00 | — | Bot waits |
+| 13:00 - 15:00 | **Afternoon** | 2 trades max |
+| After 15:00 | — | Bot idle |
+| 15:15 | Auto square-off | All positions closed |
+
+Daily cap: **4 trades max**. After 4, no new entries allowed.
+
+---
+
+## Data Flow Diagram
+
+```
+User runs:
+  run_bot.bat / run_bot.sh
+         │
+         ▼
+  runtime.py ─────────────────────────────► Telegram: "Bot starting"
+         │
+         ├── chrome_running() ────────────► Telegram: "Chrome detected"
+         │
+         ├── check_zerodha_open() ────────► Telegram: "Zerodha login done"
+         │
+         ├── openclaw_manager
+         │     ├── prepare_prompt() ──────► writes prompts/strategy_prompt.txt
+         │     │                            (145 lines: strategy + env status)
+         │     └── launch_openclaw() ─────► if installed, starts OpenClaw subprocess
+         │
+         ├── read_architecture_doc() ─────► loads arch doc into context (optional)
+         │
+         ├── strategy_engine
+         │     └── run_strategy_cycle() ──► Telegram: entry, exit, SL, limit alerts
+         │           │
+         │           ├── 30s loop
+         │           ├── session check
+         │           ├── direction (CE/PE)
+         │           ├── entry confirmation
+         │           ├── trade execution (simulated)
+         │           ├── position monitoring
+         │           ├── exit (target/SL/hard SL)
+         │           └── logs to logs/strategy_YYYY-MM-DD.log
+         │
+         └── cleanup
+               └── stop_openclaw() ───────► Telegram: "Bot stopped"
+```
 
 ---
 
@@ -114,34 +244,83 @@ The bot will:
 
 | Key | Default | Description |
 |---|---|---|
-| `simulation_mode` | `true` | All trades are simulated. Set to `false` for live trading (use at your own risk). |
-| `telegram_alerts` | `true` | Send notifications to Telegram group for each pipeline stage. |
-| `logging_enabled` | `true` | Write timestamped strategy logs to `logs/strategy_YYYY-MM-DD.log`. |
-| `architecture_doc_path` | `null` | Optional path to an architecture reference document loaded into OpenClaw's context. |
+| `simulation_mode` | `true` | All trades simulated. Set to `false` for live (use at your own risk). |
+| `telegram_alerts` | `true` | Send Telegram notifications per event. |
+| `logging_enabled` | `true` | Write timestamped logs to `logs/strategy_YYYY-MM-DD.log`. |
+| `architecture_doc_path` | `null` | Optional path to an architecture reference document. |
 
 ### `config/strategy_prompt.json`
 
+The full 16-section Intraday ATM Options Buying Strategy:
+
 ```json
 {
-  "timeframe": "15 min",
-  "direction_logic": "5 EMA crossing above 20 EMA → CE only; 5 EMA crossing below 20 EMA → PE only",
-  "confirmation": "3 min premium chart confirmation before signal",
-  "instrument": "ATM option (dynamic)"
+  "strategy_type": "Intraday ATM Options Buying",
+  "direction": {
+    "timeframe": "15 min",
+    "indicators": ["5 EMA", "20 EMA"],
+    "rules": {
+      "CE": "5 EMA crosses ABOVE 20 EMA on 15m → Enable ONLY CE",
+      "PE": "5 EMA crosses BELOW 20 EMA on 15m → Enable ONLY PE"
+    }
+  },
+  "strike_selection": {
+    "type": "ATM",
+    "rule": "CE bias → Buy ATM CE; PE bias → Buy ATM PE"
+  },
+  "entry": {
+    "timeframe": "3 min",
+    "indicators": ["5 EMA", "20 EMA"],
+    "conditions": {
+      "CE": ["15m direction = Bullish", "ATM CE premium 5 EMA crosses ABOVE 20 EMA",
+             "Inside allowed session", "Trade count not exceeded", "No active position"],
+      "PE": ["15m direction = Bearish", "ATM PE premium 5 EMA crosses BELOW 20 EMA",
+             "Inside allowed session", "Trade count not exceeded", "No active position"]
+    }
+  },
+  "capital": { "usage": "100% per trade", "quantity": "Max lots by margin" },
+  "risk_management": { "max_loss_per_trade": "10% of deployed capital" },
+  "reward_target": { "min": "20%", "max": "50%", "configurable": true },
+  "stop_loss": { "type": "EMA based", "indicator": "20 EMA of 3m premium chart" },
+  "sessions": [
+    { "name": "Morning", "start": "09:30", "end": "11:30", "max_trades": 2 },
+    { "name": "Afternoon", "start": "13:00", "end": "15:00", "max_trades": 2 }
+  ],
+  "daily_limit": { "max_trades": 4 },
+  "exit_conditions": [
+    "Profit target hit (20-50%)",
+    "EMA stop loss hit (20 EMA crossover)",
+    "Hard risk stop hit (10% loss)"
+  ],
+  "position_management": {
+    "max_active": 1,
+    "rules": ["No averaging", "No hedging", "Wait for fresh EMA crossover after exit"]
+  },
+  "auto_square_off": { "time": "15:15" },
+  "safety": ["Duplicate prevention", "API failure handling", "Emergency stop"],
+  "alerts": ["Entry", "Exit", "SL", "Target", "Session limit", "Daily limit"],
+  "logging": ["Entry/Exit time", "Direction", "Strike", "Lots", "Prices", "P&L", "Reason"],
+  "flow": [
+    "15m EMA Direction Check",
+    "Determine CE or PE Bias",
+    "Select ATM Option Premium",
+    "Monitor 3m EMA Crossover",
+    "Validate session, trade count, no active trade",
+    "Deploy 100% capital",
+    "Execute Buy Order",
+    "Monitor target, 20 EMA SL, hard SL",
+    "Exit Trade",
+    "Update Logs & Trade Count",
+    "Wait For Fresh Signal"
+  ]
 }
 ```
 
-| Key | Description |
-|---|---|
-| `timeframe` | Chart timeframe for EMA analysis |
-| `direction_logic` | Rules for determining CE (Call Entry) vs PE (Put Entry) direction |
-| `confirmation` | Additional confirmation criteria before generating a signal |
-| `instrument` | Instrument selection method |
-
-This config is combined with live environment status (Chrome running, Zerodha window detected) and written to `prompts/strategy_prompt.txt` for OpenClaw.
+This config is combined with live environment status and written to `prompts/strategy_prompt.txt` (145 lines) for OpenClaw.
 
 ### `config/telegram.json`
 
-Generated by the setup script. Do not edit manually unless updating credentials:
+Generated by the setup script:
 
 ```json
 {
@@ -152,19 +331,35 @@ Generated by the setup script. Do not edit manually unless updating credentials:
 
 ---
 
+## Log Output Example
+
+Every trade event is logged to `logs/strategy_YYYY-MM-DD.log`:
+
+```
+[2026-05-25T09:35:12.123] Session: Morning | Direction: CE | Entry: confirmed | Trades: 1/2 (session) | 1/4 (daily)
+[2026-05-25T09:35:12.456] TRADE ENTRY | CE | ATM | 2 lot(s) | Entry: 145.50 | Capital: 20000
+[2026-05-25T09:37:45.789] TRADE EXIT | CE | ATM | 2 lot(s) | Entry: 145.50 | Exit: 172.30 | P&L: +5360.0 | Reason: target | Duration: 2.6min
+[2026-05-25T10:05:30.001] Session: Morning | Direction: PE | Entry: confirmed | Trades: 2/2 (session) | 2/4 (daily)
+[2026-05-25T10:05:30.234] TRADE ENTRY | PE | ATM | 3 lot(s) | Entry: 78.20 | Capital: 20000
+[2026-05-25T10:08:12.567] TRADE EXIT | PE | ATM | 3 lot(s) | Entry: 78.20 | Exit: 70.38 | P&L: -2000.0 | Reason: hard_sl | Duration: 2.7min
+[2026-05-25T10:08:12.890] Session limit reached: Morning
+```
+
+---
+
 ## Project Structure
 
 ```
 config/
   settings.json           # Simulation mode, alerts, arch doc path
-  strategy_prompt.json    # EMA crossover strategy definition
+  strategy_prompt.json    # Full 16-section strategy definition
   telegram.json           # Bot token + group chat ID (generated by setup)
   zerodha.json            # Platform config
 core/
   browser_monitor.py      # Chrome process check (psutil)
   zerodha_monitor.py      # Zerodha/Kite window detection (pygetwindow)
   openclaw_manager.py     # OpenClaw lifecycle + prompt preparation
-  strategy_engine.py      # Configurable monitoring strategy loop
+  strategy_engine.py      # Session-aware strategy monitoring loop
   telegram_manager.py     # Telegram notification dispatcher
   runtime.py              # Pipeline orchestrator
 logs/                     # Timestamped strategy logs
@@ -181,49 +376,9 @@ AGENTS.md                 # Agent instructions for opencode.ai
 
 ---
 
-## How It Works
-
-1. **Chrome check** — Uses `psutil` to verify Chrome is running (needed for Zerodha access)
-2. **Zerodha check** — Uses `pygetwindow` to detect a browser window titled "Kite" or "Zerodha" confirming you're logged in
-3. **Prompt preparation** — Reads `config/strategy_prompt.json` and writes a formatted prompt to `prompts/strategy_prompt.txt`, including live environment status
-4. **OpenClaw launch** — Attempts to launch OpenClaw with the prepared prompt; falls back to simulation-only mode if unavailable
-5. **Architecture doc** — Optionally reads a reference document (path in `settings.json`) and makes it available in context
-6. **Strategy loop** — Runs a configurable monitoring cycle:
-   - Reads strategy settings (timeframe, direction logic, confirmation rules)
-   - Simulates CE/PE direction signals based on EMA crossover logic
-   - Logs every cycle to `logs/` with timestamps
-   - Sends Telegram alerts per cycle
-   - Sleeps and repeats
-7. **Cleanup** — Stops OpenClaw gracefully on exit
-
-### Pipeline Flow Diagram
-
-```
-run_bot.bat/.sh
-  │
-  ▼
-runtime.py
-  │
-  ├── Load settings.json
-  ├── Check Chrome running ──────────► Telegram alert
-  ├── Check Zerodha window ──────────► Telegram alert
-  ├── Prepare prompt → prompts/
-  ├── Read architecture doc (optional)
-  ├── Launch OpenClaw ───────────────► Telegram alert
-  │     └── Fallback to simulation if unavailable
-  ├── Run strategy loop ─────────────► Telegram alerts
-  │     ├── Read strategy config
-  │     ├── Generate CE/PE signals
-  │     ├── Log to logs/
-  │     └── Sleep & repeat
-  └── Cleanup on exit ───────────────► Telegram alert
-```
-
----
-
 ## Security
 
-- No live API tokens or credentials are stored in git-tracked files
+- No live API tokens or credentials in git-tracked files
 - `config/telegram.json` is populated interactively by the setup script
 - Add `config/telegram.json` to `.gitignore` to prevent accidental commits
 - `simulation_mode: true` is the default — no real trades are placed

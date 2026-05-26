@@ -3,3 +3,4 @@ python-telegram-bot
 psutil
 pygetwindow
 python-dotenv
+playwright
