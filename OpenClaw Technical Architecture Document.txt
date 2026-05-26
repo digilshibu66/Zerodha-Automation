@@ -1,0 +1,207 @@
+﻿Technical Architecture Document
+OpenClaw Automated Intraday Options Trading Setup
+Platform: Windows + Linux + OpenClaw + Zerodha + Telegram
+Phase 2 Deliverable: Full Pipeline with OpenClaw Browser Automation & Simulation
+
+1. Project Objective
+Build an automated OpenClaw-based intraday options monitoring and dummy trade simulation
+system for Zerodha. OpenClaw handles all browser automation (Chrome launch, login check,
+navigation). The strategy engine runs a Python loop for ongoing session-based monitoring
+and sends Telegram alerts for every event. All trades are simulated.
+
+2. Trading Strategy Definition
+15 Minute Chart Direction Logic:
+- 5 EMA crossing above 20 EMA -> Enable CE trades only
+- 5 EMA crossing below 20 EMA -> Enable PE trades only
+3 Minute Premium Confirmation Logic:
+- Confirm EMA crossover on premium chart before trade signal
+- Monitor ATM option dynamically
+- Send simulated entry and exit alerts in Telegram
+
+3. Phase 2 Deliverables
+
+Deliverable 1 - setup.bat / setup.sh
+- Check prerequisites (Python 3.8+, Node.js 22+, Chrome)
+- Create Python virtual environment (venv/)
+- Install Python dependencies (requests, psutil)
+- Install OpenClaw globally via npm
+- Configure OpenClaw gateway.mode=local (required for browser tools)
+- Configure OpenClaw sandbox.mode=off (no sandbox runtime needed)
+- Create the 'main' OpenClaw agent
+- Create logs/ and prompts/ directories
+- Prompt for Telegram bot token + chat_id -> config/telegram.json
+- Generate default strategy prompt -> config/strategy_prompt.json
+- Prompt for AI model provider + API key -> config/openclaw_model.json
+- Create config/settings.json with simulation mode defaults
+- Show validation summary
+
+Deliverable 2 - run.bat / run.sh -> run_bot.ps1 / run_bot.sh -> runtime.py
+- Activate Python virtual environment
+- Add npm global bin to PATH (for openclaw command)
+- Load config/settings.json
+- Prepare strategy prompt from config/strategy_prompt.json
+- Optionally load architecture reference document into prompt context
+- Configure OpenClaw (API key as env var, agent identity, auth profile)
+- Start OpenClaw gateway (background process for browser/tool WebSocket)
+- Run OpenClaw agent:
+  * OpenClaw opens Chrome (its own browser, not Playwright)
+  * Navigates to kite.zerodha.com
+  * Checks login state (dashboard vs login form)
+  * Sends Telegram login reminders/confirmation
+  * Reads strategy prompt and monitors market
+- Once agent finishes -> start strategy engine loop:
+  * Every 60s check session windows (09:30-11:30, 13:00-15:00)
+  * Simulate 15m EMA direction -> CE/PE bias
+  * Simulate 3m EMA crossover for entry
+  * Track active positions with monitor cycles
+  * Exit with target (20-50%), SL (0 to -10%), or hard SL (-10%)
+  * Telegram alerts for every event
+- On Ctrl+C: stop gateway, send Telegram shutdown alert
+
+4. Runtime Flow (detailed)
+User runs ./run.sh or run.bat
+  |
+  v
+run_bot.sh / run_bot.ps1
+  |-- Add npm global bin to PATH
+  |-- Activate venv
+  |-- python core/runtime.py
+  |
+  v
+runtime.py (pipeline orchestrator)
+  |-- Load config/settings.json
+  |-- Send "Bot starting" via Telegram
+  |
+  |-- prepare_prompt(arch_doc_content)
+  |   |-- Read config/strategy_prompt.json (full EMA strategy)
+  |   |-- Read architecture doc from settings if configured
+  |   |-- Write prompts/strategy_prompt.txt
+  |   |-- Copy to ~/.openclaw/workspace/prompts/
+  |
+  |-- configure_openclaw()
+  |   |-- Read config/openclaw_model.json
+  |   |-- Set OPENROUTER_API_KEY (or openai/anthropic/google)
+  |   |-- ensure_agent_identity() -> create 'main' agent + IDENTITY.md
+  |   |-- ensure_agent_auth() -> write auth-profiles.json
+  |
+  |-- start_gateway()
+  |   |-- subprocess: openclaw gateway run --port 18789
+  |   |-- Background process, provides browser/tool WebSocket services
+  |
+  |-- run_openclaw_agent()
+  |   |-- subprocess: openclaw agent --local --agent main --model <model> -m "<task>"
+  |   |-- INHERITS TERMINAL TTY (stdout/stderr not piped)
+  |   |-- OpenClaw opens Chrome via gateway browser tool
+  |   |-- Navigates to kite.zerodha.com
+  |   |-- Checks login: dashboard content vs login form
+  |   |-- If not logged in -> Telegram: "Please log in"
+  |   |-- Retries until login confirmed -> Telegram: "Login confirmed"
+  |   |-- Reads strategy prompt via cat prompts/strategy_prompt.txt
+  |   |-- Runs strategy steps using OpenClaw's tools/browser
+  |   |-- Sends Telegram alerts for all events
+  |   |-- Exits after timeout (180s default) or completion
+  |
+  |-- run_strategy_cycle() (Python loop, independent of OpenClaw)
+  |   |-- Every 60s:
+  |   |   |-- Check daily trade limit (max 4)
+  |   |   |-- Simulate 15m EMA direction (CE/PE random)
+  |   |   |-- Check session window (Morning 09:30-11:30 / Afternoon 13:00-15:00)
+  |   |   |-- Check session trade limit (max 2 per session)
+  |   |   |-- Simulate 3m EMA crossover for entry (random true/false)
+  |   |   |-- If entry confirmed:
+  |   |   |   |-- Deploy 100% capital, ATM strike, 1-3 lots
+  |   |   |   |-- Telegram: "Trade entry: CE ATM | 2 lot(s) @ 145.50"
+  |   |   |   |-- Monitor 3-6 cycles
+  |   |   |   |-- Exit: target / SL / hard SL (random)
+  |   |   |   |-- Telegram: "Trade exit: CE | P&L: +4500 | Reason: target"
+  |   |   |-- Log to logs/strategy_YYYY-MM-DD.log
+  |
+  |-- finally (on Ctrl+C or completion):
+      |-- stop_openclaw() -> SIGTERM -> kill gateway
+      |-- Telegram: "Bot stopped"
+
+5. Project Folder Structure
+project/
+  |-- setup.bat             Windows launcher for setup.ps1
+  |-- setup.ps1             Windows PowerShell setup script
+  |-- setup.sh              Linux/Mac setup script
+  |-- run.bat               Windows launcher for run_bot.bat
+  |-- run.sh                Linux/Mac launcher for run_bot.sh
+  |-- run_bot.bat           Windows batch runner -> run_bot.ps1
+  |-- run_bot.ps1           Windows PowerShell runner
+  |-- run_bot.sh            Linux/Mac shell runner
+  |-- AGENTS.md             AI agent instructions for this project
+  |-- README.md             Project documentation
+  |-- requirements.txt      Python dependencies
+  |
+  |-- config/
+  |   |-- telegram.json     Bot token + chat ID (setup prompts)
+  |   |-- zerodha.json      Platform config (Zerodha/Chrome)
+  |   |-- strategy_prompt.json  Full EMA crossover strategy definition
+  |   |-- openclaw_model.json   AI provider, model ID, API key
+  |   |-- settings.json     Simulation mode, alerts, architecture_doc_path
+  |
+  |-- core/
+  |   |-- openclaw_manager.py    Config, prompt prep, gateway start/stop, agent invocation
+  |   |-- strategy_engine.py     Configurable EMA crossover monitoring loop (simulated)
+  |   |-- telegram_manager.py    Telegram notification dispatcher (lazy config load)
+  |   |-- runtime.py             Pipeline orchestrator
+  |
+  |-- logs/                 Timestamped strategy logs
+  |-- prompts/              Generated prompts for OpenClaw agent
+
+6. Key Design Decisions
+
+6a. Chrome opened by OpenClaw, not Playwright
+The Python runtime does NOT launch or control Chrome. OpenClaw's agent opens Chrome
+using its own browser tool (via the gateway). The Python side only starts the gateway
+and launches the agent with the strategy prompt.
+
+6b. Terminal TTY inheritance
+The OpenClaw agent subprocess inherits the real terminal (no stdout/stderr PIPE capture).
+This means all OpenClaw output (thinking, tool calls, browser status) appears live in the
+user's terminal instead of being captured silently.
+
+6c. Gateway required
+OpenClaw's browser/tool services require a WebSocket gateway (openclaw gateway run).
+The runtime starts this as a background subprocess before launching the agent, and
+kills it on shutdown.
+
+6d. OpenClaw config (gateway + sandbox)
+Two mandatory config settings that setup scripts enforce:
+  - gateway.mode = local   (enables gateway for browser/tools)
+  - agents.defaults.sandbox.mode = off  (no sandbox/Docker required)
+
+6e. Lazy Telegram config load
+telegram_manager.py loads config/telegram.json lazily (on first send_message call)
+with try/except error handling, so a missing or invalid config does not crash the bot.
+
+7. Telegram Notification Events
+- "Bot starting"
+- "Bot stopped"
+- "OpenClaw agent starting / completed / failed"
+- "Please log in to the opened Chrome window"
+- "Zerodha login confirmed!"
+- "Trade entry: <direction> ATM | <lots> lot(s) @ <price>"
+- "Trade exit: <direction> | P&L: <amount> | Reason: <target/SL/hard_sl>"
+- "Session limit reached: <Morning/Afternoon>"
+- "Daily trade limit reached"
+- Entry/exit session status updates
+
+8. Phase 2 Included
+- Full cross-platform setup (Windows + Linux)
+- OpenClaw installation + configuration automation
+- OpenClaw browser automation (Chrome launch, Zerodha login check)
+- Terminal TTY mode for live agent output
+- Telegram bot integration (login reminders, trade alerts, status)
+- Strategy prompt generation from config
+- Architecture document reference in prompt (optional)
+- Dummy trade simulation with session windows, direction bias, entry/exit logging
+- Gateway auto-start/stop
+- Lazy Telegram config with error handling
+- Cleaned dependencies (only requests, psutil)
+
+9. Future Phases
+Phase 3 - Real Trade Execution (Kite Connect API)
+Phase 4 - Risk Management & Capital Logic
+Phase 5 - Production Stability & Testing

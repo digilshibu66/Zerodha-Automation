@@ -2,14 +2,14 @@
 
 OpenClaw-based automated intraday options monitoring and dummy trade simulation for Zerodha + Telegram.
 
-**Phase 2** — Full pipeline with Chrome/Zerodha checks, OpenClaw lifecycle, configurable strategy loop, and cross-platform launcher scripts.
+**Phase 2** — Full pipeline with OpenClaw-managed Chrome/Zerodha checks, configurable strategy loop, and cross-platform launcher scripts.
 
 ---
 
 ## Pipeline
 
 ```
-Launcher → Chrome check → Zerodha check → Prompt prep → OpenClaw launch → Strategy engine loop → Telegram alerts → Cleanup
+Launcher → Prompt prep → OpenClaw opens Chrome/Zerodha → Login check → Strategy engine loop → Telegram alerts → Cleanup
 ```
 
 Every step sends a Telegram notification so you know the bot's status in real time.
@@ -33,14 +33,14 @@ Every step sends a Telegram notification so you know the bot's status in real ti
 
 ```batch
 setup.bat
-run_bot.bat
+run.bat
 ```
 
 ### Linux / macOS
 
 ```bash
 ./setup.sh
-./run_bot.sh
+./run.sh
 ```
 
 `setup.bat` / `setup.sh` installs everything: Python venv, dependencies, OpenClaw, and prompts for Telegram credentials.
@@ -81,10 +81,10 @@ The bot sends alerts to a Telegram group. During setup you'll need:
 
 ```bash
 # Windows
-run_bot.bat
+run.bat
 
 # Linux / macOS
-./run_bot.sh
+./run.sh
 ```
 
 ---
@@ -93,22 +93,22 @@ run_bot.bat
 
 ### 1. Launch
 
-`run_bot.bat` / `run_bot.sh` activates the Python virtual environment and runs `core/runtime.py`.
+`run.bat` / `run.sh` launches the platform-specific runner, activates the Python virtual environment, and runs `core/runtime.py`.
 
 ### 2. Startup Checks
 
 | Step | What happens | Telegram alert |
 |---|---|---|
 | Load settings | Reads `config/settings.json` for simulation mode, alerts, arch doc path | "Bot starting" |
-| Chrome check | `psutil` scans running processes for "chrome" | "Chrome detected" or warning |
-| Zerodha check | `pygetwindow` looks for a window titled "Kite" or "Zerodha" | "Zerodha login is done" or warning + bot exits |
+| OpenClaw browser task | OpenClaw opens Chrome and navigates to Zerodha | Login request or confirmation |
+| Zerodha check | OpenClaw inspects Kite for dashboard/login state | Login reminder or confirmation |
 
-If Zerodha is not detected, the bot stops immediately — no trading without a logged-in session.
+If Zerodha is not logged in, OpenClaw asks for login through Telegram and retries before monitoring.
 
 ### 3. Prompt Preparation
 
-Reads `config/strategy_prompt.json` (the full 16-section strategy) and writes a 145-line prompt to `prompts/strategy_prompt.txt`. The prompt includes:
-- Live environment status (Chrome/Zerodha state fed from startup checks)
+Reads `config/strategy_prompt.json` (the full 16-section strategy) and writes a generated prompt to `prompts/strategy_prompt.txt`. The prompt includes:
+- Instructions for OpenClaw to open Chrome and verify Zerodha login itself
 - All strategy rules (direction logic, entry conditions, sessions, risk, targets, SL, exits)
 - Operating instructions for the two session windows
 
@@ -116,10 +116,10 @@ If `architecture_doc_path` is set in `settings.json`, that document is also load
 
 ### 4. OpenClaw Launch
 
-Tries `openclaw --prompt prompts/strategy_prompt.txt`:
+Runs the configured OpenClaw agent with the generated prompt:
 
-- **OpenClaw installed** → subprocess starts with the full strategy prompt
-- **Not installed** → logs a warning and continues in simulation-only mode
+- **OpenClaw installed** → agent opens Chrome, checks Zerodha login, and sends Telegram updates
+- **Not installed** → logs a warning and stops before monitoring
 
 ### 5. Strategy Engine Loop
 
@@ -195,21 +195,15 @@ Daily cap: **4 trades max**. After 4, no new entries allowed.
 
 ```
 User runs:
-  run_bot.bat / run_bot.sh
+  run.bat / run.sh
          │
          ▼
   runtime.py ─────────────────────────────► Telegram: "Bot starting"
          │
-         ├── chrome_running() ────────────► Telegram: "Chrome detected"
-         │
-         ├── check_zerodha_open() ────────► Telegram: "Zerodha login done"
-         │
          ├── openclaw_manager
          │     ├── prepare_prompt() ──────► writes prompts/strategy_prompt.txt
-         │     │                            (145 lines: strategy + env status)
-         │     └── launch_openclaw() ─────► if installed, starts OpenClaw subprocess
-         │
-         ├── read_architecture_doc() ─────► loads arch doc into context (optional)
+         │     │                            (strategy + OpenClaw browser/login instructions)
+         │     └── run_openclaw_agent() ──► OpenClaw opens Chrome and checks Zerodha login
          │
          ├── strategy_engine
          │     └── run_strategy_cycle() ──► Telegram: entry, exit, SL, limit alerts
@@ -316,7 +310,7 @@ The full 16-section Intraday ATM Options Buying Strategy:
 }
 ```
 
-This config is combined with live environment status and written to `prompts/strategy_prompt.txt` (145 lines) for OpenClaw.
+This config is written to `prompts/strategy_prompt.txt` with OpenClaw browser/login instructions.
 
 ### `config/telegram.json`
 
@@ -356,8 +350,6 @@ config/
   telegram.json           # Bot token + group chat ID (generated by setup)
   zerodha.json            # Platform config
 core/
-  browser_monitor.py      # Chrome process check (psutil)
-  zerodha_monitor.py      # Zerodha/Kite window detection (pygetwindow)
   openclaw_manager.py     # OpenClaw lifecycle + prompt preparation
   strategy_engine.py      # Session-aware strategy monitoring loop
   telegram_manager.py     # Telegram notification dispatcher
@@ -370,6 +362,8 @@ setup.sh                  # Linux/macOS: full environment setup
 run_bot.bat               # Windows: launches run_bot.ps1
 run_bot.ps1               # Windows: venv activation + bot runner
 run_bot.sh                # Linux/macOS: venv activation + bot runner
+run.bat                   # Windows: short wrapper for run_bot.bat
+run.sh                    # Linux/macOS: short wrapper for run_bot.sh
 requirements.txt          # Python dependencies
 AGENTS.md                 # Agent instructions for opencode.ai
 ```

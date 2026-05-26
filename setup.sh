@@ -88,7 +88,7 @@ fi
 
 # shellcheck disable=SC1091
 source venv/bin/activate
-if venv/bin/python -c "import requests, psutil, pygetwindow, playwright" &>/dev/null; then
+if venv/bin/python -c "import requests, psutil" &>/dev/null; then
     ok "Python dependencies already installed"
 else
     info "Installing Python dependencies..."
@@ -97,13 +97,6 @@ else
     ok "Python dependencies installed"
 fi
 
-# Install Playwright Chromium for Chrome tab inspection (cross-platform CDP detection)
-if venv/bin/python -c "import playwright" &>/dev/null && [ -d ~/.cache/ms-playwright/chromium* ] 2>/dev/null; then
-    ok "Playwright Chromium already installed"
-else
-    info "Installing Playwright Chromium..."
-    venv/bin/python -m playwright install chromium 2>/dev/null || warn "Playwright browser install skipped (not critical)"
-fi
 echo ""
 
 # ------------------------------------------------------------------
@@ -142,11 +135,28 @@ else
     fi
 fi
 
-# Ensure OpenClaw global config is valid (set gateway.mode local)
+# Ensure OpenClaw global config is valid (gateway + sandbox)
 if openclaw --version &>/dev/null; then
     mkdir -p "${HOME}/.openclaw"
     if ! openclaw config validate &>/dev/null; then
         openclaw config set gateway.mode local 2>/dev/null || true
+    fi
+    openclaw config set agents.defaults.sandbox.mode off 2>/dev/null || true
+fi
+echo ""
+
+# ------------------------------------------------------------------
+# Ensure the 'main' agent exists
+# ------------------------------------------------------------------
+if openclaw --version &>/dev/null; then
+    if openclaw agents list --json 2>/dev/null | "$PYTHON" -c "import sys,json; d=json.load(sys.stdin); e=any(a.get('id')=='main' for a in (d if isinstance(d,list) else d.get('agents',[]))); sys.exit(0 if e else 1)" &>/dev/null; then
+        ok "OpenClaw 'main' agent exists"
+    else
+        info "Creating 'main' agent for OpenClaw..."
+        mkdir -p "${HOME}/.openclaw/workspace"
+        openclaw agents add main --non-interactive --workspace "${HOME}/.openclaw/workspace" &>/dev/null && \
+            ok "OpenClaw 'main' agent created" || \
+            warn "Could not create 'main' agent (will be created at runtime)"
     fi
 fi
 echo ""
@@ -320,6 +330,7 @@ echo ""
 info "Setting executable permissions..."
 chmod +x setup.sh
 [ -f "run_bot.sh" ] && chmod +x run_bot.sh
+[ -f "run.sh" ] && chmod +x run.sh
 ok "Permissions set"
 echo ""
 
@@ -355,8 +366,8 @@ check "Telegram config exists"       "[ -s config/telegram.json ]"
 check "Strategy prompt exists"       "[ -s config/strategy_prompt.json ]"
 check "Zerodha config exists"        "[ -s config/zerodha.json ]"
 check "Settings config exists"       "[ -s config/settings.json ]"
-check "OpenClaw model config exists" "[ -s config/openclaw_model.json ]"
-check "Playwright Chromium installed"  "venv/bin/python -c 'import playwright' 2>/dev/null"
+check "OpenClaw model config exists"              "[ -s config/openclaw_model.json ]"
+check "OpenClaw 'main' agent exists"              "openclaw agents list --json 2>/dev/null | \"$PYTHON\" -c 'import sys,json; d=json.load(sys.stdin); e=any(a.get(\"id\")==\"main\" for a in (d if isinstance(d,list) else d.get(\"agents\",[]))); sys.exit(0 if e else 1)'"
 
 echo ""
 echo "  $PASS passed, $FAIL failed"
@@ -370,7 +381,7 @@ fi
 
 echo ""
 echo "Next steps:"
-echo "  1. Ensure Chrome is installed and logged into Zerodha"
+echo "  1. Ensure Chrome is installed; OpenClaw will open Kite and request login if needed"
 echo "  2. Activate venv: source venv/bin/activate"
-echo "  3. Run bot:    ./run_bot.sh"
+echo "  3. Run bot:    ./run.sh"
 echo ""

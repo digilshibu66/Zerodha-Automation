@@ -33,7 +33,7 @@ Info "Virtual environment activated"
 
 # Run the bot
 try {
-    & python core\runtime.py
+    & python core\runtime.py $args
 } catch {
     Write-Host "[ERROR] Bot crashed: $_" -ForegroundColor Red
     Read-Host "Press Enter to exit"

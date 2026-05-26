@@ -252,7 +252,7 @@ if (Test-Path $venvActivate) {
 $venvPython = Join-Path $scriptDir "venv\Scripts\python.exe"
 $pip = Join-Path $scriptDir "venv\Scripts\pip.exe"
 
-$depsCheck = & $venvPython -c "import requests, psutil, pygetwindow" 2>&1
+$depsCheck = & $venvPython -c "import requests, psutil" 2>&1
 if ($LASTEXITCODE -eq 0) {
     Ok "Python dependencies already installed"
 } else {
@@ -262,17 +262,6 @@ if ($LASTEXITCODE -eq 0) {
     if ($LASTEXITCODE -eq 0) { Ok "Python dependencies installed" } else { Fail "pip install failed"; exit 1 }
 }
 
-# Install Playwright Chromium for Chrome tab inspection (cross-platform CDP detection)
-$pwCheck = & $venvPython -c "import playwright" 2>&1
-if ($LASTEXITCODE -eq 0) {
-    Ok "Playwright already installed"
-} else {
-    Info "Installing Playwright and Chromium..."
-    & $pip install playwright -q 2>$null
-    & $venvPython -m playwright install chromium 2>&1 | Out-Null
-    $pwOk = & $venvPython -c "import playwright" 2>&1
-    if ($LASTEXITCODE -eq 0) { Ok "Playwright Chromium installed" } else { Warn "Playwright browser install skipped (not critical)" }
-}
 Write-Host ""
 
 # ------------------------------------------------------------------
@@ -331,7 +320,7 @@ if ($ocReady) {
     }
 }
 
-# Ensure OpenClaw global config is valid (set gateway.mode local)
+# Ensure OpenClaw global config is valid (gateway + sandbox)
 try {
     $null = & openclaw --version 2>&1
     if ($LASTEXITCODE -eq 0) {
@@ -339,12 +328,48 @@ try {
         if ($LASTEXITCODE -ne 0) {
             & openclaw config set gateway.mode local 2>&1 | Out-Null
         }
+        & openclaw config set agents.defaults.sandbox.mode off 2>&1 | Out-Null
     }
 } catch {}
 Write-Host ""
 
 # ------------------------------------------------------------------
-# Step 6 — Create missing directories
+# Step 6 — Ensure the 'main' OpenClaw agent exists
+# ------------------------------------------------------------------
+Section "OpenClaw agent"
+
+try {
+    $null = & openclaw --version 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        $agentExists = $false
+        try {
+            $agentsRaw = & openclaw agents list --json 2>$null
+            if ($LASTEXITCODE -eq 0 -and $agentsRaw) {
+                $agentsData = $agentsRaw | ConvertFrom-Json
+                $agents = if ($agentsData -is [System.Array]) { $agentsData } else { $agentsData.agents }
+                $agentExists = @($agents | Where-Object { $_.id -eq "main" }).Count -gt 0
+            }
+        } catch {}
+
+        if ($agentExists) {
+            Ok "OpenClaw 'main' agent exists"
+        } else {
+            Info "Creating 'main' agent for OpenClaw..."
+            $workspace = Join-Path $env:USERPROFILE ".openclaw\workspace"
+            New-Item -ItemType Directory -Force -Path $workspace | Out-Null
+            & openclaw agents add main --non-interactive --workspace $workspace 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) { Ok "OpenClaw 'main' agent created" } else { Warn "Could not create 'main' agent (will be created at runtime)" }
+        }
+    } else {
+        Warn "OpenClaw not available; agent will be created at runtime if possible"
+    }
+} catch {
+    Warn "OpenClaw agent check skipped"
+}
+Write-Host ""
+
+# ------------------------------------------------------------------
+# Step 7 — Create missing directories
 # ------------------------------------------------------------------
 Section "Project directories"
 
@@ -354,7 +379,7 @@ Ok "Directories: logs/, prompts/"
 Write-Host ""
 
 # ------------------------------------------------------------------
-# Step 7 — Configure Telegram Bot
+# Step 8 — Configure Telegram Bot
 # ------------------------------------------------------------------
 Section "Telegram Bot configuration"
 
@@ -401,7 +426,7 @@ if ($needTelegram) {
 Write-Host ""
 
 # ------------------------------------------------------------------
-# Step 8 — Save strategy prompt
+# Step 9 — Save strategy prompt
 # ------------------------------------------------------------------
 Section "Strategy prompt"
 
@@ -454,7 +479,7 @@ if ((Test-Path $strategyConfig) -and ((Get-Item $strategyConfig).Length -gt 0)) 
 Write-Host ""
 
 # ------------------------------------------------------------------
-# Step 9 — Configure OpenClaw model
+# Step 10 — Configure OpenClaw model
 # ------------------------------------------------------------------
 Section "OpenClaw Model Configuration"
 
@@ -518,7 +543,7 @@ if ($hasModelConfig -and $hasRealApiKey) {
 Write-Host ""
 
 # ------------------------------------------------------------------
-# Step 10 — Validation summary
+# Step 11 — Validation summary
 # ------------------------------------------------------------------
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host " Setup Complete - Validation Summary" -ForegroundColor Cyan
@@ -554,7 +579,16 @@ Check "Strategy prompt exists"       { (Test-Path "config\strategy_prompt.json")
 Check "Zerodha config exists"        { Test-Path "config\zerodha.json" }
 Check "Settings config exists"       { Test-Path "config\settings.json" }
 Check "OpenClaw model config exists"  { Test-Path "config\openclaw_model.json" }
-Check "Playwright Chromium installed"  { & "venv\Scripts\python.exe" -c "import playwright" 2>$null; $LASTEXITCODE -eq 0 }
+Check "OpenClaw 'main' agent exists"  {
+    $agentsRaw = & openclaw agents list --json 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $agentsRaw) {
+        $false
+    } else {
+        $agentsData = $agentsRaw | ConvertFrom-Json
+        $agents = if ($agentsData -is [System.Array]) { $agentsData } else { $agentsData.agents }
+        @($agents | Where-Object { $_.id -eq "main" }).Count -gt 0
+    }
+}
 
 Write-Host ""
 Write-Host "  $passed passed, $failed failed" -ForegroundColor $(if ($failed -eq 0) { "Green" } else { "Yellow" })
@@ -568,9 +602,9 @@ if ($failed -gt 0) {
 
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor White
-Write-Host "  1. Make sure Chrome is installed and logged into Zerodha"
+Write-Host "  1. Make sure Chrome is installed; OpenClaw will open Kite and request login if needed"
 Write-Host "  2. Activate venv: .\venv\Scripts\Activate.ps1"
-Write-Host "  3. Run bot:    python core\runtime.py"
+Write-Host "  3. Run bot:    run.bat"
 Write-Host ""
 
 Read-Host "Press Enter to exit"
