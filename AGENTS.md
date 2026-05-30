@@ -20,7 +20,7 @@ OpenClaw-based automated intraday options monitoring and dummy trade simulation 
 | `config/openclaw_model.json` | AI provider, model ID, API key for OpenClaw |
 | `core/openclaw_manager.py` | OpenClaw config, prompt prep, gateway start/stop, agent invocation |
 | `core/strategy_engine.py` | Configurable EMA crossover strategy monitoring loop |
-| `core/telegram_manager.py` | Telegram notification dispatcher |
+| `core/telegram_manager.py` | Telegram notification dispatcher + group inbox polling |
 | `core/runtime.py` | Pipeline orchestrator |
 
 ## Pipeline Flow
@@ -40,9 +40,11 @@ run.sh → runtime.py → 1. Load settings
 ## How OpenClaw AI Agent Works
 - Uses `openclaw agent --local --agent main --model <configured-model> -m "..."`
 - Requires the OpenClaw gateway (`openclaw gateway run`) for browser/tool services
-- Calls OpenRouter API via env var `OPENROUTER_API_KEY`
+- AI auth/model are stored in `config/openclaw_model.json`; launchers reuse saved config and only reauth/change when requested
+- Supports API-key providers and OpenClaw-managed OAuth such as OpenAI Codex OAuth
 - OpenClaw handles browser automation (Chrome launch, navigation, login detection)
 - Strategy engine runs independently for ongoing monitoring (Python loop)
+- Runtime polls the configured Telegram group every 5 seconds and mirrors messages into `prompts/telegram_inbox.txt` for OpenClaw to read
 
 ## Browser Automation
 - Chrome is opened by OpenClaw itself, not by Playwright or the Python runtime

@@ -1,0 +1,85 @@
+1. Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+
+2. .\setup.ps1
+
+3. npm uninstall -g openclaw
+
+4. npm uninstall -g @openclaw/codex
+
+5. Remove-Item -Recurse -Force "$env:USERPROFILE\.openclaw\npm"
+
+6. npm install -g openclaw@latest
+
+7. npm install -g @openclaw/codex@latest
+
+8. openclaw --version
+
+9. npm list -g --depth=0
+
+10. openclaw onboard --auth-choice openai-codex
+
+11. Edit config manually
+
+Open this file:
+
+C:\Users\hp\.openclaw\openclaw.json
+
+Also open your bot config:
+
+config\openclaw_model.json
+
+Replace the provider/model config with:
+
+{
+  "provider": "openai-codex",
+  "auth_type": "oauth",
+  "model": "openai-codex/gpt-5.5"
+}
+
+Then make sure the main config contains:
+
+{
+  "agents": {
+    "defaults": {
+      "workspace": "C:\\Users\\hp\\.openclaw\\workspace",
+      "models": {
+        "openai-codex/gpt-5.5": {}
+      },
+      "model": {
+        "primary": "openai-codex/gpt-5.5"
+      }
+    }
+  },
+  "plugins": {
+    "allow": ["codex"],
+    "entries": {
+      "codex": {
+        "enabled": true
+      }
+    }
+  },
+  "auth": {
+    "profiles": {
+      "openai-codex:digilshibu99@gmail.com": {
+        "provider": "openai-codex",
+        "mode": "oauth",
+        "email": "digilshibu99@gmail.com"
+      }
+    }
+  }
+}
+
+Then run:
+
+openclaw plugins install @openclaw/codex
+openclaw plugins list
+
+Verify you see:
+
+codex
+12.in users/.openclaw/openclaw.json
+"gateway":{
+    "mode": "local"
+  },
+13.config/telegram.json in .openclaw
+14. .\run_bot.ps1

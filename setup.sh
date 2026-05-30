@@ -45,20 +45,18 @@ ok "Python $PY_VER ($PYTHON)"
 if command -v node &>/dev/null; then
     NODE_MAJOR=$(node --version 2>&1 | sed 's/v//' | cut -d. -f1)
     if [ "$NODE_MAJOR" -lt 22 ]; then
-        fail "Node.js 22+ required (found $(node --version))"
-        exit 1
+        warn "Node.js 22+ recommended for OpenClaw (found $(node --version)); the OpenClaw installer may update it."
+    else
+        ok "Node.js $(node --version)"
     fi
-    ok "Node.js $(node --version)"
 else
-    fail "Node.js not found. Install Node.js 22+ first."
-    exit 1
+    warn "Node.js not found. The OpenClaw installer will try to install or bootstrap it."
 fi
 
 if command -v npm &>/dev/null; then
     ok "npm $(npm --version)"
 else
-    fail "npm not found."
-    exit 1
+    warn "npm not found. The OpenClaw installer will try to install or bootstrap Node/npm."
 fi
 
 CHROME_FOUND=false
@@ -88,12 +86,28 @@ fi
 
 # shellcheck disable=SC1091
 source venv/bin/activate
-if venv/bin/python -c "import requests, psutil" &>/dev/null; then
-    ok "Python dependencies already installed"
+if venv/bin/python - <<'PY' &>/dev/null
+import importlib.metadata as metadata
+import pathlib
+import re
+
+requirements = pathlib.Path("requirements.txt")
+if requirements.exists():
+    for raw_line in requirements.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line.startswith("-"):
+            continue
+        name = re.split(r"[<>=!~;\[]", line, maxsplit=1)[0].strip()
+        if name:
+            metadata.distribution(name)
+PY
+then
+    ok "All Python requirements are already installed"
 else
-    info "Installing Python dependencies..."
-    pip install --upgrade pip -q
-    pip install -r requirements.txt -q
+    info "Installing missing Python requirements..."
+    info "Download/install progress will be shown below."
+    pip install --upgrade pip
+    pip install -r requirements.txt
     ok "Python dependencies installed"
 fi
 
@@ -106,9 +120,15 @@ echo ""
 if openclaw --version &>/dev/null; then
     ok "OpenClaw already installed ($(openclaw --version))"
 else
-    # Check common npm global paths and add to PATH if found
-    NPM_PREFIX=$(npm config get prefix)
-    for _dir in "$NPM_PREFIX/bin" "$HOME/.npm-global/bin" "$HOME/node_modules/.bin"; do
+    # Check common official installer and npm global paths and add to PATH if found
+    OPENCLAW_SEARCH_DIRS=("$HOME/.local/bin" "$HOME/.npm-global/bin" "$HOME/node_modules/.bin")
+    if command -v npm &>/dev/null; then
+        NPM_PREFIX=$(npm config get prefix 2>/dev/null || true)
+        if [ -n "$NPM_PREFIX" ]; then
+            OPENCLAW_SEARCH_DIRS+=("$NPM_PREFIX" "$NPM_PREFIX/bin")
+        fi
+    fi
+    for _dir in "${OPENCLAW_SEARCH_DIRS[@]}"; do
         if [ -f "$_dir/openclaw" ] || [ -f "$_dir/openclaw.cmd" ]; then
             export PATH="$_dir:$PATH"
             break
@@ -117,20 +137,15 @@ else
     if openclaw --version &>/dev/null; then
         ok "OpenClaw already installed ($(openclaw --version))"
     else
-        info "Installing OpenClaw..."
-        if [ ! -w "$NPM_PREFIX" ]; then
-            LOCAL_NPM_DIR="$HOME/.npm-global"
-            warn "npm global prefix ($NPM_PREFIX) not writable without sudo"
-            info "Configuring npm to use local prefix: $LOCAL_NPM_DIR"
-            mkdir -p "$LOCAL_NPM_DIR"
-            npm config set prefix "$LOCAL_NPM_DIR"
-            if ! grep -q '\.npm-global/bin' "$HOME/.bashrc" 2>/dev/null; then
-                echo 'export PATH="$HOME/.npm-global/bin:$PATH"' >> "$HOME/.bashrc"
-            fi
+        info "Installing OpenClaw using the official installer..."
+        info "Download/install progress will be shown below."
+        if command -v curl &>/dev/null; then
+            curl -fsSL https://openclaw.ai/install.sh | bash
+        else
+            fail "curl is required to download the OpenClaw installer."
+            exit 1
         fi
-        NPM_BIN_DIR="$(npm config get prefix)/bin"
-        export PATH="$NPM_BIN_DIR:$PATH"
-        npm install -g openclaw
+        hash -r
         ok "OpenClaw installed ($(openclaw --version))"
     fi
 fi
@@ -280,27 +295,23 @@ else
     echo "Select the AI model provider for OpenClaw:"
     echo "  1) OpenAI"
     echo "  2) OpenRouter"
-    echo "  3) Anthropic"
-    echo "  4) Google Gemini"
-    echo "  5) Other (OpenAI-compatible)"
-    read -r -p "Choice [1]: " MODEL_CHOICE
-    MODEL_CHOICE=${MODEL_CHOICE:-1}
+    echo "  3) OpenCode"
+    echo "  4) Anthropic"
+    echo "  5) Gemini"
+    read -r -p "Choice [3]: " MODEL_CHOICE
+    MODEL_CHOICE=${MODEL_CHOICE:-3}
 
     case $MODEL_CHOICE in
         1) PROVIDER="openai"; DEFAULT_MODEL="gpt-4o" ;;
         2) PROVIDER="openrouter"; DEFAULT_MODEL="openrouter/auto" ;;
-        3) PROVIDER="anthropic"; DEFAULT_MODEL="claude-sonnet-4-20250514" ;;
-        4) PROVIDER="google"; DEFAULT_MODEL="gemini-2.5-pro" ;;
-        5) PROVIDER="custom"; DEFAULT_MODEL="" ;;
+        3) PROVIDER="opencode"; DEFAULT_MODEL="opencode/deepseek-v4-flash-free" ;;
+        4) PROVIDER="anthropic"; DEFAULT_MODEL="claude-sonnet-4-20250514" ;;
+        5) PROVIDER="google"; DEFAULT_MODEL="google/gemini-3.1-pro-preview" ;;
+        *) PROVIDER="opencode"; DEFAULT_MODEL="opencode/deepseek-v4-flash-free" ;;
     esac
 
-    if [ "$PROVIDER" != "custom" ]; then
-        read -r -p "Model [$DEFAULT_MODEL]: " MODEL_NAME
-        MODEL_NAME=${MODEL_NAME:-$DEFAULT_MODEL}
-    else
-        read -r -p "Provider identifier (e.g. openai, openrouter): " PROVIDER
-        read -r -p "Model name: " MODEL_NAME
-    fi
+    read -r -p "Model [$DEFAULT_MODEL]: " MODEL_NAME
+    MODEL_NAME=${MODEL_NAME:-$DEFAULT_MODEL}
 
     read -r -p "API key (leave blank to set later): " API_KEY
 
@@ -316,7 +327,11 @@ EOF
 
     # Save API key as env var (model is passed via CLI in runtime, not stored in global config)
     if [ -n "$API_KEY" ]; then
-        ENV_VAR="${PROVIDER^^}_API_KEY"
+        if [ "$PROVIDER" = "google" ]; then
+            ENV_VAR="GEMINI_API_KEY"
+        else
+            ENV_VAR="${PROVIDER^^}_API_KEY"
+        fi
         grep -q "$ENV_VAR" "${HOME}/.bashrc" 2>/dev/null || echo "export $ENV_VAR='$API_KEY'" >> "${HOME}/.bashrc"
         export "$ENV_VAR=$API_KEY"
         ok "API key saved to ~/.bashrc as $ENV_VAR"
@@ -357,8 +372,26 @@ check() {
     fi
 }
 
+check_python_requirements() {
+    venv/bin/python - <<'PY'
+import importlib.metadata as metadata
+import pathlib
+import re
+
+requirements = pathlib.Path("requirements.txt")
+if requirements.exists():
+    for raw_line in requirements.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line.startswith("-"):
+            continue
+        name = re.split(r"[<>=!~;\[]", line, maxsplit=1)[0].strip()
+        if name:
+            metadata.distribution(name)
+PY
+}
+
 check "Python virtual environment"    "[ -f venv/bin/python ]"
-check "Python venv dependencies"       "venv/bin/python -c 'import requests, psutil'"
+check "Python venv requirements"       "check_python_requirements"
 check "OpenClaw installed"           "command -v openclaw"
 check "logs/ directory"              "[ -d logs ]"
 check "prompts/ directory"           "[ -d prompts ]"

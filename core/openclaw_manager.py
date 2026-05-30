@@ -1,8 +1,11 @@
 import json
 import logging
 import os
+import secrets
 import subprocess
 import time
+import urllib.error
+import urllib.request
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +17,83 @@ PROMPTS_DIR = "prompts"
 STRATEGY_CONFIG = "config/strategy_prompt.json"
 MODEL_CONFIG = "config/openclaw_model.json"
 PROMPT_FILE = os.path.join(PROMPTS_DIR, "strategy_prompt.txt")
+OPENCODE_FREE_MODEL = "opencode/deepseek-v4-flash-free"
+
+
+def _normalize_model_for_openclaw(provider, model):
+    if not model:
+        return model
+
+    if provider == "opencode" and model == "opencode/big-pickle":
+        return model
+
+    # Prevent double prefix like openai/openai-codex/gpt-5.5
+    if "/" in model:
+        return model
+
+    return f"{provider}/{model}"
+
+def _api_key_env_vars(provider):
+    """Return provider env vars used by OpenClaw for API-key auth."""
+    if provider in ("opencode", "opencode-go"):
+        return ["OPENCODE_API_KEY"]
+    if provider == "google":
+        return ["GEMINI_API_KEY", "GOOGLE_API_KEY"]
+    return [f"{provider.upper().replace('-', '_')}_API_KEY"]
+
+
+def _check_provider_connectivity(provider, api_key):
+    """Fail fast when the configured LLM provider cannot be reached."""
+    provider = (provider or "").lower()
+    checks = {
+        "openrouter": (
+            "https://openrouter.ai/api/v1/key",
+            {"Authorization": f"Bearer {api_key}", "User-Agent": "trading-automation-bot"},
+        ),
+        "openai": (
+            "https://api.openai.com/v1/models",
+            {"Authorization": f"Bearer {api_key}"},
+        ),
+        "anthropic": (
+            "https://api.anthropic.com/v1/models",
+            {"x-api-key": api_key, "anthropic-version": "2023-06-01"},
+        ),
+        "opencode": (
+            "https://opencode.ai/zen/v1/models",
+            {"User-Agent": "trading-automation-bot"},
+        ),
+        "opencode-go": (
+            "https://opencode.ai/zen/v1/models",
+            {"User-Agent": "trading-automation-bot"},
+        ),
+        "google": (
+            f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}",
+            {"User-Agent": "trading-automation-bot"},
+        ),
+    }
+
+    if provider not in checks:
+        logger.info("No provider preflight configured for %s", provider)
+        return True
+
+    url, headers = checks[provider]
+    request = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            if 200 <= response.status < 300:
+                logger.info("%s provider preflight passed", provider)
+                return True
+            logger.warning("%s provider preflight failed with HTTP %s", provider, response.status)
+            return False
+    except urllib.error.HTTPError as e:
+        logger.warning("%s provider preflight failed with HTTP %s: %s", provider, e.code, e.reason)
+        return False
+    except urllib.error.URLError as e:
+        logger.warning("%s provider preflight failed: %s", provider, e.reason)
+        return False
+    except Exception as e:
+        logger.warning("%s provider preflight failed: %s", provider, e)
+        return False
 
 
 def _find_openclaw():
@@ -21,13 +101,41 @@ def _find_openclaw():
     if _oc_bin:
         return _oc_bin
     import shutil
-    candidates = [
-        "openclaw",
-        os.path.expanduser("~/.npm-global/bin/openclaw"),
+    candidates = ["openclaw", "openclaw.cmd"]
+    path_dirs = [
+        os.path.expanduser("~/.local/bin"),
+        os.path.expanduser("~/.npm-global/bin"),
+        os.path.expanduser("~/node_modules/.bin"),
     ]
-    npm_prefix = os.popen("npm config get prefix 2>/dev/null").read().strip()
-    if npm_prefix:
-        candidates.append(os.path.join(npm_prefix, "bin", "openclaw"))
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        path_dirs.append(os.path.join(appdata, "npm"))
+    localappdata = os.environ.get("LOCALAPPDATA")
+    if localappdata:
+        path_dirs.extend([
+            os.path.join(localappdata, "npm"),
+            os.path.join(localappdata, "OpenClaw", "deps", "portable-node"),
+        ])
+
+    try:
+        npm_prefix = subprocess.run(
+            ["npm", "config", "get", "prefix"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+            check=False,
+        ).stdout.strip()
+        if npm_prefix:
+            path_dirs.extend([npm_prefix, os.path.join(npm_prefix, "bin")])
+    except Exception:
+        pass
+
+    candidates = [
+        *candidates,
+        *[os.path.join(d, name) for d in path_dirs for name in ("openclaw", "openclaw.cmd")],
+    ]
     for c in candidates:
         resolved = shutil.which(c) or (c if os.path.isfile(c) else None)
         if resolved:
@@ -37,13 +145,13 @@ def _find_openclaw():
 
 
 def load_strategy():
-    with open(STRATEGY_CONFIG) as f:
+    with open(STRATEGY_CONFIG, encoding="utf-8-sig") as f:
         return json.load(f)
 
 
 def load_model_config():
     try:
-        with open(MODEL_CONFIG) as f:
+        with open(MODEL_CONFIG, encoding="utf-8-sig") as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return None
@@ -114,7 +222,7 @@ def ensure_agent_identity():
     )
     try:
         os.makedirs(os.path.dirname(identity_md), exist_ok=True)
-        with open(identity_md, "w") as f:
+        with open(identity_md, "w", encoding="utf-8") as f:
             f.write(identity_content)
         logger.info("IDENTITY.md written to workspace")
     except Exception as e:
@@ -130,27 +238,42 @@ def ensure_agent_auth():
     auth_file = os.path.expanduser(
         "~/.openclaw/agents/main/agent/auth-profiles.json"
     )
-    if os.path.isfile(auth_file):
-        return True
     model_cfg = load_model_config()
     if not model_cfg:
         return False
+    if model_cfg.get("auth_type") == "oauth":
+        logger.info("OpenClaw OAuth auth selected; using OpenClaw-managed auth profiles")
+        return True
     api_key = model_cfg.get("api_key", "")
     if not api_key or api_key == "YOUR_API_KEY":
         return False
     provider = model_cfg.get("provider", "openai")
+    profiles = {
+        f"{provider}:default": {
+            "type": "api_key",
+            "provider": provider,
+            "key": api_key,
+        }
+    }
+    if provider in ("opencode", "opencode-go"):
+        profiles["opencode:default"] = {
+            "type": "api_key",
+            "provider": "opencode",
+            "key": api_key,
+        }
+        profiles["opencode-go:default"] = {
+            "type": "api_key",
+            "provider": "opencode-go",
+            "key": api_key,
+        }
+
     profile = {
-        "profiles": [
-            {
-                "name": "default",
-                "provider": provider,
-                "apiKey": api_key,
-            }
-        ]
+        "version": 1,
+        "profiles": profiles,
     }
     try:
         os.makedirs(os.path.dirname(auth_file), exist_ok=True)
-        with open(auth_file, "w") as f:
+        with open(auth_file, "w", encoding="utf-8") as f:
             json.dump(profile, f, indent=2)
         os.chmod(auth_file, 0o600)
         logger.info("Auth profile written to %s", auth_file)
@@ -170,16 +293,25 @@ def configure_openclaw():
     provider = model_cfg.get("provider", "openai")
     model = model_cfg.get("model", "gpt-4o")
     api_key = model_cfg.get("api_key", "")
+    auth_type = model_cfg.get("auth_type", "api_key")
+    model = _normalize_model_for_openclaw(provider, model)
 
-    if api_key and api_key != "YOUR_API_KEY":
-        env_var = f"{provider.upper()}_API_KEY"
-        os.environ[env_var] = api_key
+    if auth_type == "oauth":
+        logger.info("Using OpenClaw-managed OAuth auth for provider: %s", provider)
     else:
-        logger.warning("No valid API key in config")
-        return False
+        if api_key and api_key != "YOUR_API_KEY":
+            for env_var in _api_key_env_vars(provider):
+                os.environ[env_var] = api_key
+        else:
+            logger.warning("No valid API key in config")
+            return False
+
+        if not _check_provider_connectivity(provider, api_key):
+            logger.warning("OpenClaw provider preflight failed — update provider/API key or check network access")
+            return False
 
     _configured_model = model
-    logger.info("OpenClaw configured with model: %s", model)
+    logger.info("OpenClaw configured with provider: %s, model: %s", provider, model)
 
     ensure_agent_identity()
     ensure_agent_auth()
@@ -190,6 +322,16 @@ _gateway_proc = None
 
 
 _gateway_log_file = None
+
+
+def _ensure_gateway_token():
+    token = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "").strip()
+    if token:
+        return token
+    token = secrets.token_urlsafe(32)
+    os.environ["OPENCLAW_GATEWAY_TOKEN"] = token
+    logger.info("Generated runtime OpenClaw gateway token for this bot session")
+    return token
 
 
 def _stop_existing_gateway(oc_bin):
@@ -266,6 +408,7 @@ def start_gateway():
         return False
 
     import tempfile
+    gateway_token = _ensure_gateway_token()
 
     # Always stop any existing gateway first so we get a clean start
     _stop_existing_gateway(oc_bin)
@@ -275,19 +418,19 @@ def start_gateway():
     _gateway_log_file = log_path
 
     try:
-        log_fh = os.fdopen(log_fd, "w")
+        log_fh = os.fdopen(log_fd, "w", encoding="utf-8", errors="replace")
         _gateway_proc = subprocess.Popen(
-            [oc_bin, "gateway", "run", "--port", "18789"],
+            [oc_bin, "gateway", "run", "--port", "18789", "--token", gateway_token],
             stdout=log_fh,
             stderr=log_fh,
         )
         logger.info("OpenClaw gateway starting (PID %d)...", _gateway_proc.pid)
         logger.info("Gateway log: %s", log_path)
 
-        # The gateway's browser service takes ~50-60s to fully initialise.
-        # We wait 65s to be safe before launching the agent.
-        logger.info("Waiting 65 seconds for browser service to initialise...")
-        for i in range(65):
+        wait_seconds = int(os.environ.get("OPENCLAW_GATEWAY_WAIT_SECONDS", "30"))
+        # Keep startup short by default; increase OPENCLAW_GATEWAY_WAIT_SECONDS if a machine needs more browser warmup time.
+        logger.info("Waiting %d seconds for browser service to initialise...", wait_seconds)
+        for i in range(wait_seconds):
             time.sleep(1)
             if (i + 1) % 10 == 0:
                 logger.info("  ... %ds elapsed", i + 1)
@@ -301,14 +444,18 @@ def start_gateway():
 def prepare_prompt(platform="Zerodha", arch_doc_content=None):
     os.makedirs(PROMPTS_DIR, exist_ok=True)
     s = load_strategy()
+    chart_cfg = s.get("chart", {})
+    chart_symbol = str(chart_cfg.get("symbol", "NIFTY")).strip().upper()
 
     if platform.lower() == "upstox":
         platform_name = "Upstox"
         login_url = "https://login.upstox.com"
+        post_login_url = chart_cfg.get("url", "https://pro.upstox.com/trading-charts")
         success_indicators = "dashboard, holdings, positions, portfolio, funds, or orders"
     else:
         platform_name = "Zerodha"
         login_url = "https://kite.zerodha.com"
+        post_login_url = login_url
         success_indicators = "dashboard, holdings, or positions"
 
     lines = []
@@ -319,22 +466,45 @@ def prepare_prompt(platform="Zerodha", arch_doc_content=None):
     lines.append("YOUR ROLE")
     lines.append("-" * 40)
     lines.append(f"You are an automated intraday options trading agent for {platform_name}.")
+    lines.append("You are also the project programmer/operator for this bot.")
     lines.append("You run in two sessions per day. All trades are simulated.")
     lines.append("You communicate with the user via Telegram for login and status.")
+    lines.append("Live Telegram group replies are mirrored into prompts/telegram_inbox.txt by the runtime.")
     lines.append(f"Use OpenClaw's own tool/browser environment to open Chrome and inspect {platform_name}.")
+    lines.append("")
+
+    lines.append("PROGRAMMER / AUTO-FIX ROLE")
+    lines.append("-" * 40)
+    lines.append("If a runtime error, command failure, browser automation issue, missing config, or recoverable setup problem occurs, diagnose it and make the smallest safe fix.")
+    lines.append("After fixing, rerun the failed command or browser step to verify the fix before continuing.")
+    lines.append("Never write real credentials, tokens, or API keys into tracked files; ask the user via Telegram if a secret is required.")
+    lines.append("Do not change the trading strategy rules unless the user explicitly asks.")
+    lines.append("Send Telegram status messages when a problem is detected, after a fix is applied, and after verification succeeds or fails.")
+    lines.append("")
+
+    lines.append("TELEGRAM GROUP INPUT")
+    lines.append("-" * 40)
+    lines.append("The Python runtime polls the configured Telegram group every 5 seconds and appends new messages to prompts/telegram_inbox.txt.")
+    lines.append("Check prompts/telegram_inbox.txt whenever waiting for login, chart selection, STOP/WAIT commands, or user assistance.")
+    lines.append("Treat new Telegram group messages as user instructions unless they request unsafe credential handling or unapproved strategy changes.")
     lines.append("")
 
     lines.append(f"STEP 1 — OPEN CHROME & CHECK {platform_name.upper()} LOGIN")
     lines.append("-" * 40)
-    lines.append("CRITICAL: Always use the 'openclaw' managed browser profile.")
-    lines.append("Do NOT use the 'user' profile — it requires remote debugging and will fail.")
-    lines.append("1. Open the 'openclaw' managed Chrome profile using OpenClaw's browser tool.")
+    lines.append("CRITICAL: Use the 'user' Chrome profile so existing browser login/session data can be reused.")
+    lines.append("If the user profile cannot be attached, ask the user to close Chrome and relaunch with remote debugging enabled.")
+    lines.append("1. Open the 'user' Chrome profile using OpenClaw's browser tool.")
     lines.append(f"2. Reuse the active tab (or navigate the active tab directly) to go to {login_url}.")
     lines.append(f"3. Close any extra tabs (like 'New Tab' or 'about:blank') so only the {platform_name} page is open.")
     lines.append(f"4. Check if already logged in by looking for {success_indicators} content.")
     lines.append(f"5. If login page detected, send Telegram: 'Please log in to the opened Chrome window.'")
-    lines.append("6. Wait and retry until login is confirmed.")
-    lines.append(f"7. Once logged in, send Telegram: '{platform_name} login confirmed!'")
+    lines.append("6. If the user is clicking, selecting a Chrome profile, or entering login details, wait and do not interrupt.")
+    lines.append("7. Recheck the page every 5 seconds until login is confirmed.")
+    lines.append(f"8. Once logged in, send Telegram: '{platform_name} login confirmed!'")
+    if platform_name == "Upstox":
+        lines.append(f"9. After login, navigate to {post_login_url}.")
+        lines.append(f"10. On Trading Charts, select the configured index: {chart_symbol}.")
+        lines.append(f"11. If {chart_symbol} cannot be found, ask the user via Telegram before clicking another chart symbol.")
     lines.append("")
 
     lines.append("STEP 2 — SEND TELEGRAM MESSAGES")
@@ -349,6 +519,13 @@ def prepare_prompt(platform="Zerodha", arch_doc_content=None):
     lines.append("-" * 40)
     lines.append(s.get("strategy_type", "N/A"))
     lines.append("")
+
+    if platform_name == "Upstox":
+        lines.append("UPSTOX CHART TARGET")
+        lines.append("-" * 40)
+        lines.append(f"Trading Charts URL: {post_login_url}")
+        lines.append(f"Configured chart symbol: {chart_symbol}")
+        lines.append("")
 
     lines.append("DIRECTION LOGIC (Higher Timeframe Filter)")
     lines.append("-" * 40)
@@ -449,13 +626,22 @@ def prepare_prompt(platform="Zerodha", arch_doc_content=None):
     lines.append("1. Open Chrome using OpenClaw's own browser/tool capability.")
     lines.append(f"2. Navigate to {login_url} and check login state.")
     lines.append("3. If not logged in, send Telegram asking user to login.")
-    lines.append(f"4. Wait and retry until {platform_name.lower()} dashboard/holdings is detected.")
-    lines.append("5. Once logged in, send Telegram confirmation.")
-    lines.append("6. All trades are simulated. Monitor EMA crossover strategy.")
-    lines.append("7. Sessions: 09:30-11:30 (max 2), 13:00-15:00 (max 2).")
-    lines.append("8. Stop by 15:15 auto square-off.")
-    lines.append("9. Send Telegram alerts for every event (entry, exit, SL, target).")
-    lines.append("10. Use OpenClaw for browser operations and curl/bash only for Telegram or file checks when needed.")
+    lines.append("4. If the user is interacting with Chrome, wait without interrupting.")
+    lines.append(f"5. Recheck every 5 seconds until {platform_name.lower()} dashboard/holdings is detected.")
+    lines.append("6. Once logged in, send Telegram confirmation.")
+    if platform_name == "Upstox":
+        lines.append(f"7. Navigate to {post_login_url} and open Trading Charts.")
+        lines.append(f"8. Select the configured {chart_symbol} chart; ask the user via Telegram if that symbol cannot be found.")
+        next_step = 9
+    else:
+        next_step = 7
+    lines.append(f"{next_step}. All trades are simulated. Monitor EMA crossover strategy.")
+    lines.append(f"{next_step + 1}. Sessions: 09:30-11:30 (max 2), 13:00-15:00 (max 2).")
+    lines.append(f"{next_step + 2}. Stop by 15:15 auto square-off.")
+    lines.append(f"{next_step + 3}. Send Telegram alerts for every event (entry, exit, SL, target).")
+    lines.append(f"{next_step + 4}. Use OpenClaw for browser operations and curl/bash only for Telegram or file checks when needed.")
+    lines.append(f"{next_step + 5}. If errors occur, act as programmer/operator: fix safely, rerun, verify, and report through Telegram.")
+    lines.append(f"{next_step + 6}. Read prompts/telegram_inbox.txt for new Telegram group messages while waiting or when user input is needed.")
 
     if arch_doc_content:
         lines.append("")
@@ -464,7 +650,7 @@ def prepare_prompt(platform="Zerodha", arch_doc_content=None):
         lines.append(arch_doc_content)
 
     content = "\n".join(lines)
-    with open(PROMPT_FILE, "w") as f:
+    with open(PROMPT_FILE, "w", encoding="utf-8") as f:
         f.write(content)
     logger.info("Prompt saved to %s (%d lines)", PROMPT_FILE, len(lines))
 
@@ -473,7 +659,7 @@ def prepare_prompt(platform="Zerodha", arch_doc_content=None):
     ws_file = os.path.join(ws_dir, "strategy_prompt.txt")
     try:
         os.makedirs(ws_dir, exist_ok=True)
-        with open(ws_file, "w") as f:
+        with open(ws_file, "w", encoding="utf-8") as f:
             f.write(content)
         logger.info("Prompt also written to %s", ws_file)
     except Exception as e:
@@ -482,7 +668,7 @@ def prepare_prompt(platform="Zerodha", arch_doc_content=None):
     return PROMPT_FILE
 
 
-def run_openclaw_agent(task_message, timeout_seconds=None):
+def run_openclaw_agent(task_message, timeout_seconds=None, platform="Zerodha"):
     """Launch the OpenClaw TUI agent in the current terminal with the given task.
 
     The agent inherits stdin/stdout/stderr so the full OpenClaw TUI is visible.
@@ -501,7 +687,7 @@ def run_openclaw_agent(task_message, timeout_seconds=None):
     try:
         session_key = f"agent:main:trading-bot-{int(time.time())}"
         logger.info("Launching OpenClaw agent (session: %s)...", session_key)
-        logger.info("OpenClaw will open Chrome, navigate to Zerodha, and wait for your login.")
+        logger.info("OpenClaw will open Chrome, navigate to %s, and wait for your login.", platform)
         logger.info("Please log in when Chrome opens. OpenClaw detects login automatically.")
         print("\n" + "=" * 60)
         print(" OpenClaw Trading Agent starting — Chrome will open shortly")

@@ -57,14 +57,27 @@ cd TRADING-AUTOMATION
 ```
 
 Run the setup script for your platform. It will:
-- Check for Python 3.8+, Node.js 22+, npm, and Chrome
+- Check for Python 3.8+, Node.js/npm, and Chrome; the OpenClaw installer can bootstrap Node/npm when needed
 - Create a Python virtual environment (`venv/`)
-- Install Python dependencies
-- Install OpenClaw globally via npm
+- Reuse an existing Python virtual environment and install missing requirements only
+- Check/install Git on Windows before OpenClaw setup so the installer does not need to bootstrap portable Git
+- Install OpenClaw with the official OpenClaw installer
+- Show installer download/progress output for troubleshooting
+- Show an elapsed-time spinner while the OpenClaw installer is running
 - Create `logs/` and `prompts/` directories
 - Prompt for Telegram bot configuration
 - Generate the default strategy config
 - Run a validation summary
+
+OpenClaw is installed with the official installer command for each platform:
+
+```powershell
+powershell -c "irm https://openclaw.ai/install.ps1 | iex"
+```
+
+```bash
+curl -fsSL https://openclaw.ai/install.sh | bash
+```
 
 ### Step 2 — Telegram Group Setup
 
@@ -95,15 +108,24 @@ run.bat
 
 `run.bat` / `run.sh` launches the platform-specific runner, activates the Python virtual environment, and runs `core/runtime.py`.
 
+On each run, the launcher checks saved config first:
+- AI auth/model in `config/openclaw_model.json`. If complete, the Windows launcher reuses it automatically; pass `-Configure` or `-Reauth` only when you want to change or refresh auth.
+- First-time setup or reauth can configure OpenCode Zen, OpenCode Go, OpenAI API, OpenAI Codex OAuth, Anthropic, Gemini, or OpenRouter. API-key flows save the key in project config; OAuth flows use OpenClaw-managed auth.
+- OpenClaw onboarding/model setup is run by the launcher during first setup or reauth, then `openclaw models set <provider/model>` sets the selected default model.
+- Trading platform in `config/platform.json` (`Zerodha` or `Upstox`). If complete, the Windows launcher reuses it automatically; pass `-Configure` to change it.
+
+To force provider setup, run `run_bot.ps1 -Configure` on Windows or `./run_bot.sh --configure` on Linux/macOS. To re-run OpenClaw auth for the saved provider, run `run_bot.ps1 -Reauth` or `./run_bot.sh --reauth`.
+
 ### 2. Startup Checks
 
 | Step | What happens | Telegram alert |
 |---|---|---|
 | Load settings | Reads `config/settings.json` for simulation mode, alerts, arch doc path | "Bot starting" |
-| OpenClaw browser task | OpenClaw opens Chrome and navigates to Zerodha | Login request or confirmation |
-| Zerodha check | OpenClaw inspects Kite for dashboard/login state | Login reminder or confirmation |
+| Provider preflight | Checks the configured AI provider/API key before launching OpenClaw | Failure alert if OpenClaw cannot continue |
+| OpenClaw browser task | OpenClaw opens Chrome and navigates to the selected platform | Login request or confirmation |
+| Platform login check | OpenClaw inspects Zerodha/Upstox for dashboard/login state | Login reminder or confirmation |
 
-If Zerodha is not logged in, OpenClaw asks for login through Telegram and retries before monitoring.
+If the selected platform is not logged in, OpenClaw asks for login through Telegram and retries before monitoring.
 
 ### 3. Prompt Preparation
 
@@ -118,8 +140,25 @@ If `architecture_doc_path` is set in `settings.json`, that document is also load
 
 Runs the configured OpenClaw agent with the generated prompt:
 
-- **OpenClaw installed** → agent opens Chrome, checks Zerodha login, and sends Telegram updates
+- **OpenClaw installed** → agent opens Chrome using the `user` Chrome profile, checks selected-platform login, and sends Telegram updates
+- **Provider/API key unavailable** → logs the provider preflight failure and stops before launching the OpenClaw agent
 - **Not installed** → logs a warning and stops before monitoring
+
+The runtime writes OpenClaw credentials to the current user's profile, for example `C:\Users\<you>\.openclaw\agents\main\agent\auth-profiles.json` on Windows. The file uses OpenClaw's `version: 1` auth profile format, so switching PCs requires entering the provider API key once on that PC.
+
+For local browser/tool access, the runtime also sets `OPENCLAW_GATEWAY_TOKEN` automatically when it is missing and starts the Gateway with that same token. This lets the OpenClaw agent authenticate to the local Gateway without manually editing `C:\Users\<you>\.openclaw\openclaw.json`.
+
+The generated prompt asks OpenClaw to use the `user` Chrome profile so an existing browser login/session can be reused. If OpenClaw cannot attach to that profile, close normal Chrome windows and relaunch Chrome with remote debugging enabled before running the bot again.
+
+The runtime polls the configured Telegram group every 5 seconds and writes new messages to `prompts/telegram_inbox.txt`. These messages are also logged in the launcher console, so messages sent in the group appear in `run_bot.ps1` while the bot is running. OpenClaw is instructed to read this inbox while waiting for login, chart selection, STOP/WAIT commands, or user assistance. If group messages do not appear, disable BotFather privacy mode for the bot or send command-style messages such as `/nifty`, `/sensex`, `/stop`.
+
+When the selected platform is Upstox, OpenClaw waits while the user selects a Chrome profile or completes login, rechecking login state every 5 seconds. After login it navigates to the `chart.url` in `config/strategy_prompt.json` and selects the configured `chart.symbol` such as `NIFTY`; if the symbol cannot be found, it asks through Telegram before clicking another chart.
+
+The generated OpenClaw task also assigns the agent a programmer/operator role. If a recoverable runtime error, command failure, browser automation issue, missing config, or setup problem occurs, the agent is instructed to make the smallest safe fix, rerun the failed step, verify the result, and report status through Telegram. It must not write real credentials or API keys into tracked files and must not change strategy rules unless explicitly requested.
+
+If the first OpenClaw browser/setup run exits with an error, the runtime starts one automatic recovery attempt with instructions to inspect logs/config, fix safely, rerun the failed step, verify, and report through Telegram. If recovery also fails, market monitoring is not started.
+
+Startup waits 30 seconds for the OpenClaw gateway/browser service by default. If a slower machine needs more warmup time, set `OPENCLAW_GATEWAY_WAIT_SECONDS` before launching the bot.
 
 ### 5. Strategy Engine Loop
 

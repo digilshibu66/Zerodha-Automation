@@ -16,6 +16,23 @@ function Section($title) {
     Write-Host ""
     Write-Host "--- $title" -ForegroundColor Cyan
 }
+function Invoke-WithProgress($filePath, [string[]]$argumentList, $label) {
+    $frames = @("|", "/", "-", "\")
+    $started = Get-Date
+    $i = 0
+    $proc = Start-Process -FilePath $filePath -ArgumentList $argumentList -NoNewWindow -PassThru
+    while (-not $proc.HasExited) {
+        $elapsed = [int]((Get-Date) - $started).TotalSeconds
+        $frame = $frames[$i % $frames.Count]
+        Write-Host -NoNewline "`r[INFO] $label still running $frame elapsed ${elapsed}s"
+        Start-Sleep -Seconds 1
+        $i++
+        $proc.Refresh()
+    }
+    $elapsed = [int]((Get-Date) - $started).TotalSeconds
+    Write-Host "`r[INFO] $label finished in ${elapsed}s                          "
+    return $proc.ExitCode
+}
 
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host " OpenClaw Trading Automation Setup" -ForegroundColor Cyan
@@ -33,7 +50,7 @@ if (-not $isAdmin) {
 Write-Host ""
 
 # ------------------------------------------------------------------
-# Step 1 — Check / Install Python
+# Step 1 - Check / Install Python
 # ------------------------------------------------------------------
 Section "Python 3.8+"
 
@@ -78,7 +95,8 @@ if ($pythonExe) {
         try {
             $null = Get-Command winget -ErrorAction Stop
             Info "Installing Python via winget..."
-            winget install --id Python.Python --silent --accept-package-agreements 2>&1 | Out-Null
+            Info "Download/install progress will be shown below."
+            & winget install --id Python.Python.3.12 --exact --source winget --accept-package-agreements --accept-source-agreements
             if ($LASTEXITCODE -eq 0) {
                 Ok "Python installed via winget"
                 # Refresh PATH
@@ -109,9 +127,10 @@ if ($pythonExe) {
                 throw "winget exit code: $LASTEXITCODE"
             }
         } catch {
-            Warn "Automatic install failed. Download Python manually:"
+            Warn "Automatic install failed: $($_.Exception.Message)"
+            Warn "Download Python manually:"
             Write-Host "  https://www.python.org/downloads/" -ForegroundColor Cyan
-            Read-Host "Press Enter after installing Python"
+            Read-Host "After the installer finishes, press Enter here (do not paste the URL)"
             # Re-check after user installs
             try {
                 $ver = & py -3 --version 2>&1
@@ -132,7 +151,7 @@ if ($pythonExe) {
 Write-Host ""
 
 # ------------------------------------------------------------------
-# Step 2 — Check / Install Node.js
+# Step 2 - Check / Install Node.js
 # ------------------------------------------------------------------
 Section "Node.js 22+"
 
@@ -158,7 +177,8 @@ if ($nodeExe) {
         try {
             $null = Get-Command winget -ErrorAction Stop
             Info "Installing Node.js via winget..."
-            winget install --id OpenJS.NodeJS.LTS --silent --accept-package-agreements 2>&1 | Out-Null
+            Info "Download/install progress will be shown below."
+            & winget install --id OpenJS.NodeJS.LTS --exact --source winget --accept-package-agreements --accept-source-agreements
             if ($LASTEXITCODE -eq 0) {
                 Ok "Node.js installed via winget"
                 $env:Path = [Environment]::GetEnvironmentVariable("Path", "User") + ";" + [Environment]::GetEnvironmentVariable("Path", "Machine")
@@ -173,9 +193,10 @@ if ($nodeExe) {
                 throw "winget exit code: $LASTEXITCODE"
             }
         } catch {
-            Warn "Automatic install failed. Download Node.js 22+ manually:"
+            Warn "Automatic install failed: $($_.Exception.Message)"
+            Warn "Download Node.js 22+ manually:"
             Write-Host "  https://nodejs.org/" -ForegroundColor Cyan
-            Read-Host "Press Enter after installing Node.js"
+            Read-Host "After the installer finishes, press Enter here (do not paste the URL)"
             try {
                 $ver = & node --version 2>&1
                 if ($LASTEXITCODE -eq 0) { $nodeExe = "node"; $nodeVer = $ver }
@@ -193,7 +214,7 @@ if ($nodeExe) {
 Write-Host ""
 
 # ------------------------------------------------------------------
-# Step 3 — Check Chrome
+# Step 3 - Check Chrome
 # ------------------------------------------------------------------
 Section "Google Chrome"
 
@@ -220,7 +241,7 @@ if ($chromeFound) {
 Write-Host ""
 
 # ------------------------------------------------------------------
-# Step 4 — Python virtual environment
+# Step 4 - Python virtual environment
 # ------------------------------------------------------------------
 Section "Python virtual environment"
 
@@ -252,20 +273,105 @@ if (Test-Path $venvActivate) {
 $venvPython = Join-Path $scriptDir "venv\Scripts\python.exe"
 $pip = Join-Path $scriptDir "venv\Scripts\pip.exe"
 
-$depsCheck = & $venvPython -c "import requests, psutil" 2>&1
+$missingDeps = & $venvPython -c "import importlib.metadata as m, pathlib, re, sys; req=pathlib.Path('requirements.txt'); missing=[]; lines=req.read_text().splitlines() if req.exists() else []; [missing.append(re.split(r'[<>=!~;\[]', line.strip(), maxsplit=1)[0].strip()) for line in lines if line.strip() and not line.lstrip().startswith('#') and not line.lstrip().startswith('-') and not m.distribution(re.split(r'[<>=!~;\[]', line.strip(), maxsplit=1)[0].strip())]" 2>&1
 if ($LASTEXITCODE -eq 0) {
-    Ok "Python dependencies already installed"
+    Ok "All Python requirements are already installed"
 } else {
-    Info "Installing Python dependencies..."
-    & $pip install --upgrade pip -q 2>$null
-    & $pip install -r requirements.txt -q
+    Info "Installing missing Python requirements..."
+    Info "Download/install progress will be shown below."
+    & $pip install --upgrade pip
+    & $pip install -r requirements.txt
     if ($LASTEXITCODE -eq 0) { Ok "Python dependencies installed" } else { Fail "pip install failed"; exit 1 }
 }
 
 Write-Host ""
 
 # ------------------------------------------------------------------
-# Step 5 — OpenClaw installation
+# Step 5 - Git for OpenClaw installer
+# ------------------------------------------------------------------
+Section "Git"
+
+$gitFound = $false
+function Find-GitOnWindows {
+    $gitDirs = @(
+        "$env:ProgramFiles\Git\cmd",
+        "$env:ProgramFiles\Git\bin",
+        "${env:ProgramFiles(x86)}\Git\cmd",
+        "${env:ProgramFiles(x86)}\Git\bin",
+        "$env:LOCALAPPDATA\Programs\Git\cmd",
+        "$env:LOCALAPPDATA\Programs\Git\bin"
+    )
+    foreach ($dir in $gitDirs) {
+        if (-not $dir -or -not (Test-Path $dir)) { continue }
+        $gitExe = Join-Path $dir "git.exe"
+        if (Test-Path $gitExe) {
+            $env:Path = "$dir;$env:Path"
+            return $true
+        }
+    }
+    return $false
+}
+
+function Test-GitAvailable {
+    try {
+        $gitVer = & git --version 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Ok "Found $gitVer"
+            return $true
+        }
+    } catch {}
+    if (Find-GitOnWindows) {
+        try {
+            $gitVer = & git --version 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Ok "Found $gitVer"
+                return $true
+            }
+        } catch {}
+    }
+    return $false
+}
+
+$gitFound = Test-GitAvailable
+
+if (-not $gitFound) {
+    Warn "Git not found. OpenClaw installer needs Git and may otherwise download portable Git."
+    $choice = Read-Host "Install Git automatically using winget? (Y/n)"
+    if ($choice -ne "n") {
+        try {
+            $null = Get-Command winget -ErrorAction Stop
+            Info "Installing Git via winget..."
+            Info "Download/install progress will be shown below."
+            & winget install --id Git.Git --exact --source winget --accept-package-agreements --accept-source-agreements
+            if ($LASTEXITCODE -eq 0) {
+                Ok "Git installed via winget"
+                $env:Path = [Environment]::GetEnvironmentVariable("Path", "User") + ";" + [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + $env:Path
+                $gitFound = Test-GitAvailable
+                if (-not $gitFound) { Warn "Git installed but not available in this terminal yet" }
+            } else {
+                Warn "winget returned exit code: $LASTEXITCODE"
+                Warn "Checking common Git install paths..."
+                $env:Path = [Environment]::GetEnvironmentVariable("Path", "User") + ";" + [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + $env:Path
+                $gitFound = Test-GitAvailable
+                if (-not $gitFound) { throw "Git is installed or winget found it, but git.exe is not on PATH" }
+            }
+        } catch {
+            Warn "Automatic Git install failed: $($_.Exception.Message)"
+            if (Test-GitAvailable) {
+                $gitFound = $true
+            } else {
+                Warn "OpenClaw installer will try to bootstrap portable Git instead."
+            }
+            Warn "Manual Git installer: https://git-scm.com/download/win"
+        }
+    } else {
+        Warn "Skipping Git install; OpenClaw installer may bootstrap portable Git."
+    }
+}
+Write-Host ""
+
+# ------------------------------------------------------------------
+# Step 6 - OpenClaw installation
 # ------------------------------------------------------------------
 Section "OpenClaw"
 
@@ -277,12 +383,20 @@ try {
 } catch {}
 
 if (-not $ocReady) {
-    $npmPrefix = & npm config get prefix
     $searchPaths = @(
-        "$npmPrefix\openclaw.cmd", "$npmPrefix\openclaw"
         "$env:LOCALAPPDATA\npm\openclaw.cmd", "$env:LOCALAPPDATA\npm\openclaw"
+        "$env:APPDATA\npm\openclaw.cmd", "$env:APPDATA\npm\openclaw"
+        "$env:USERPROFILE\.local\bin\openclaw.cmd", "$env:USERPROFILE\.local\bin\openclaw"
+        "$env:LOCALAPPDATA\OpenClaw\deps\portable-node\openclaw.cmd", "$env:LOCALAPPDATA\OpenClaw\deps\portable-node\openclaw"
         "$env:ProgramFiles\nodejs\openclaw.cmd", "$env:ProgramFiles\nodejs\openclaw"
     )
+    $npmCmd = Get-Command npm -ErrorAction SilentlyContinue
+    if ($npmCmd) {
+        $npmPrefix = & $npmCmd.Source config get prefix 2>$null
+        if ($npmPrefix) {
+            $searchPaths += "$npmPrefix\openclaw.cmd", "$npmPrefix\openclaw", "$npmPrefix\bin\openclaw.cmd", "$npmPrefix\bin\openclaw"
+        }
+    }
     foreach ($p in $searchPaths) {
         if (Test-Path $p) {
             $dir = Split-Path $p -Parent
@@ -299,24 +413,18 @@ if ($ocReady) {
     $ocVer = & openclaw --version 2>&1
     Ok "OpenClaw already installed ($ocVer)"
 } else {
-    Info "Installing OpenClaw via npm..."
+    Info "Installing OpenClaw using the official installer..."
+    Info "Download/install progress will be shown below."
     try {
-        & npm install -g openclaw 2>&1 | Out-Null
-        if ($LASTEXITCODE -eq 0) {
+        $installCode = Invoke-WithProgress "powershell" @("-c", "irm https://openclaw.ai/install.ps1 | iex") "OpenClaw installer"
+        if ($installCode -eq 0) {
+            $env:Path = [Environment]::GetEnvironmentVariable("Path", "User") + ";" + [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + $env:Path
             $ocVer = & openclaw --version 2>&1
             if ($LASTEXITCODE -eq 0) { Ok "OpenClaw installed ($ocVer)" } else { Ok "OpenClaw installed" }
-        } else { throw "npm install failed with exit code $LASTEXITCODE" }
+        } else { throw "OpenClaw installer failed with exit code $installCode" }
     } catch {
-        Warn "Global npm install failed. Trying with --prefix..."
-        $localNpmDir = Join-Path $scriptDir "node_modules\.global"
-        New-Item -ItemType Directory -Force -Path $localNpmDir | Out-Null
-        & npm install openclaw --prefix $localNpmDir 2>&1 | Out-Null
-        if ($LASTEXITCODE -eq 0) {
-            $env:Path = (Join-Path $localNpmDir "node_modules\.bin") + ";" + $env:Path
-            Ok "OpenClaw installed locally"
-        } else {
-            Warn "OpenClaw installation failed. Try running as Administrator."
-        }
+        Warn "OpenClaw installation failed: $($_.Exception.Message)"
+        Warn 'Try running this manually in PowerShell: powershell -c "irm https://openclaw.ai/install.ps1 | iex"'
     }
 }
 
@@ -334,7 +442,7 @@ try {
 Write-Host ""
 
 # ------------------------------------------------------------------
-# Step 6 — Ensure the 'main' OpenClaw agent exists
+# Step 7 - Ensure the 'main' OpenClaw agent exists
 # ------------------------------------------------------------------
 Section "OpenClaw agent"
 
@@ -369,7 +477,7 @@ try {
 Write-Host ""
 
 # ------------------------------------------------------------------
-# Step 7 — Create missing directories
+# Step 8 - Create missing directories
 # ------------------------------------------------------------------
 Section "Project directories"
 
@@ -379,7 +487,7 @@ Ok "Directories: logs/, prompts/"
 Write-Host ""
 
 # ------------------------------------------------------------------
-# Step 8 — Configure Telegram Bot
+# Step 9 - Configure Telegram Bot
 # ------------------------------------------------------------------
 Section "Telegram Bot configuration"
 
@@ -410,10 +518,10 @@ if ($needTelegram) {
     Write-Host "3. Send a test message in the group (any text)." -ForegroundColor White
     Write-Host ""
     Write-Host "4. Get the group chat_id:" -ForegroundColor White
-    Write-Host "   Option A — Search @getidsbot, add it to the group, it will reply with the chat ID." -ForegroundColor White
-    Write-Host "   Option B — Visit in browser (after step 3):" -ForegroundColor White
+    Write-Host "   Option A - Search @getidsbot, add it to the group, it will reply with the chat ID." -ForegroundColor White
+    Write-Host "   Option B - Visit in browser (after step 3):" -ForegroundColor White
     Write-Host "     https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates" -ForegroundColor Cyan
-    Write-Host "     Look for 'chat':{'id':-100...} — that negative number is the group chat_id." -ForegroundColor White
+    Write-Host "     Look for 'chat':{'id':-100...} - that negative number is the group chat_id." -ForegroundColor White
     Write-Host "--------------------------------------------------------------------" -ForegroundColor Cyan
     $botToken = Read-Host "Enter bot_token"
     $chatId   = Read-Host "Enter group chat_id (negative number, e.g. -1001234567890)"
@@ -426,7 +534,7 @@ if ($needTelegram) {
 Write-Host ""
 
 # ------------------------------------------------------------------
-# Step 9 — Save strategy prompt
+# Step 10 - Save strategy prompt
 # ------------------------------------------------------------------
 Section "Strategy prompt"
 
@@ -440,13 +548,13 @@ if ((Test-Path $strategyConfig) -and ((Get-Item $strategyConfig).Length -gt 0)) 
             timeframe = "15 min"
             indicators = @("5 EMA", "20 EMA")
             rules = @{
-                CE = "5 EMA crosses ABOVE 20 EMA on 15m chart → Enable ONLY CE trades"
-                PE = "5 EMA crosses BELOW 20 EMA on 15m chart → Enable ONLY PE trades"
+                CE = "5 EMA crosses ABOVE 20 EMA on 15m chart -> Enable ONLY CE trades"
+                PE = "5 EMA crosses BELOW 20 EMA on 15m chart -> Enable ONLY PE trades"
             }
         }
         strike_selection = @{
             type = "ATM"
-            rule = "If CE bias → Buy ATM CE; If PE bias → Buy ATM PE"
+            rule = "If CE bias -> Buy ATM CE; If PE bias -> Buy ATM PE"
             note = "ATM strike dynamically updates based on current underlying spot price"
         }
         entry = @{
@@ -458,7 +566,7 @@ if ((Test-Path $strategyConfig) -and ((Get-Item $strategyConfig).Length -gt 0)) 
             }
         }
         capital = @{ usage = "100% of available capital per trade"; quantity = "Maximum possible lots using available margin, multiple lots allowed" }
-        risk_management = @{ max_loss_per_trade = "10% of deployed capital"; example = "If capital = ₹20,000, max loss = ₹2,000" }
+        risk_management = @{ max_loss_per_trade = "10% of deployed capital"; example = "If capital = Rs.20,000, max loss = Rs.2,000" }
         reward_target = @{ min = "20% of deployed capital"; max = "50% of deployed capital"; configurable = $true }
         stop_loss = @{ type = "EMA based"; indicator = "20 EMA of 3-minute premium chart"; condition = "Exit if premium price touches/closes beyond 20 EMA against trade direction" }
         sessions = @(
@@ -479,7 +587,7 @@ if ((Test-Path $strategyConfig) -and ((Get-Item $strategyConfig).Length -gt 0)) 
 Write-Host ""
 
 # ------------------------------------------------------------------
-# Step 10 — Configure OpenClaw model
+# Step 11 - Configure OpenClaw model
 # ------------------------------------------------------------------
 Section "OpenClaw Model Configuration"
 
@@ -501,27 +609,23 @@ if ($hasModelConfig -and $hasRealApiKey) {
     Write-Host "Select provider for OpenClaw:" -ForegroundColor White
     Write-Host "  1) OpenAI"
     Write-Host "  2) OpenRouter"
-    Write-Host "  3) Anthropic"
-    Write-Host "  4) Google Gemini"
-    Write-Host "  5) Other"
-    $modelChoice = Read-Host "Choice [1]"
-    if ([string]::IsNullOrWhiteSpace($modelChoice)) { $modelChoice = "1" }
+    Write-Host "  3) OpenCode"
+    Write-Host "  4) Anthropic"
+    Write-Host "  5) Gemini"
+    $modelChoice = Read-Host "Choice [3]"
+    if ([string]::IsNullOrWhiteSpace($modelChoice)) { $modelChoice = "3" }
 
     switch ($modelChoice) {
         "1" { $provider = "openai"; $defaultModel = "gpt-4o" }
         "2" { $provider = "openrouter"; $defaultModel = "openrouter/auto" }
-        "3" { $provider = "anthropic"; $defaultModel = "claude-sonnet-4-20250514" }
-        "4" { $provider = "google"; $defaultModel = "gemini-2.5-pro" }
-        "5" { $provider = "custom"; $defaultModel = "" }
+        "3" { $provider = "opencode"; $defaultModel = "opencode/deepseek-v4-flash-free" }
+        "4" { $provider = "anthropic"; $defaultModel = "claude-sonnet-4-20250514" }
+        "5" { $provider = "google"; $defaultModel = "google/gemini-3.1-pro-preview" }
+        default { $provider = "opencode"; $defaultModel = "opencode/deepseek-v4-flash-free" }
     }
 
-    if ($provider -ne "custom") {
-        $modelName = Read-Host "Model [$defaultModel]"
-        if ([string]::IsNullOrWhiteSpace($modelName)) { $modelName = $defaultModel }
-    } else {
-        $provider = Read-Host "Provider identifier (e.g. openai, openrouter)"
-        $modelName = Read-Host "Model name"
-    }
+    $modelName = Read-Host "Model [$defaultModel]"
+    if ([string]::IsNullOrWhiteSpace($modelName)) { $modelName = $defaultModel }
 
     $apiKey = Read-Host "API key (leave blank to set later)"
 
@@ -533,7 +637,9 @@ if ($hasModelConfig -and $hasRealApiKey) {
         $envVarName = switch ($provider) {
             "openai"    { "OPENAI_API_KEY" }
             "openrouter" { "OPENROUTER_API_KEY" }
-            "anthropic"  { "ANTHROPIC_API_KEY" }
+            "opencode"  { "OPENCODE_API_KEY" }
+            "anthropic" { "ANTHROPIC_API_KEY" }
+            "google"    { "GEMINI_API_KEY" }
             default     { "${provider}_API_KEY".ToUpper() }
         }
         [Environment]::SetEnvironmentVariable($envVarName, $apiKey, "User")
@@ -543,7 +649,7 @@ if ($hasModelConfig -and $hasRealApiKey) {
 Write-Host ""
 
 # ------------------------------------------------------------------
-# Step 11 — Validation summary
+# Step 12 - Validation summary
 # ------------------------------------------------------------------
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host " Setup Complete - Validation Summary" -ForegroundColor Cyan
@@ -570,7 +676,7 @@ function Check($desc, $scriptBlock) {
 }
 
 Check "Python virtual environment"   { Test-Path "venv\Scripts\python.exe" }
-Check "Python venv dependencies"     { & "venv\Scripts\python.exe" -c "import requests, psutil; print('OK')" 2>$null; $LASTEXITCODE -eq 0 }
+Check "Python venv requirements"     { & "venv\Scripts\python.exe" -c "import importlib.metadata as m, pathlib, re; req=pathlib.Path('requirements.txt'); lines=req.read_text().splitlines() if req.exists() else []; [m.distribution(re.split(r'[<>=!~;\[]', line.strip(), maxsplit=1)[0].strip()) for line in lines if line.strip() and not line.lstrip().startswith('#') and not line.lstrip().startswith('-') and re.split(r'[<>=!~;\[]', line.strip(), maxsplit=1)[0].strip()]" 2>$null; $LASTEXITCODE -eq 0 }
 Check "OpenClaw installed"           { Get-Command openclaw -ErrorAction SilentlyContinue }
 Check "logs/ directory"              { Test-Path "logs" }
 Check "prompts/ directory"           { Test-Path "prompts" }

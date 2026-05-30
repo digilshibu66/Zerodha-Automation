@@ -1,5 +1,10 @@
 {
   "strategy_type": "Intraday ATM Options Buying",
+  "chart": {
+    "platform": "Upstox",
+    "url": "https://pro.upstox.com/trading-charts",
+    "symbol": "NIFTY"
+  },
   "direction": {
     "timeframe": "15 min",
     "indicators": ["5 EMA", "20 EMA"],
