@@ -571,16 +571,16 @@ if ((Test-Path $strategyConfig) -and ((Get-Item $strategyConfig).Length -gt 0)) 
         stop_loss = @{ type = "EMA based"; indicator = "20 EMA of 3-minute premium chart"; condition = "Exit if premium price touches/closes beyond 20 EMA against trade direction" }
         sessions = @(
             @{ name = "Morning"; start = "09:30"; end = "11:30"; max_trades = 2 }
-            @{ name = "Afternoon"; start = "13:00"; end = "15:00"; max_trades = 2 }
+            @{ name = "Afternoon"; start = "13:30"; end = "15:00"; max_trades = 2 }
         )
         daily_limit = @{ max_trades = 4; rule = "After 4 completed trades, block all new entries" }
         exit_conditions = @("Profit target hit (20%-50% of deployed capital)", "EMA stop loss hit (price crosses 20 EMA on 3m premium chart)", "Hard risk stop hit (loss reaches 10% of deployed capital)")
         position_management = @{ max_active = 1; rules = @("Only ONE active trade at a time", "No averaging", "No hedging", "No reverse entry without fresh signal", "Wait for fresh EMA crossover after exit") }
         auto_square_off = @{ time = "15:15"; rule = "Exit all open positions before market close" }
-        safety = @("Duplicate order prevention", "API failure handling", "Internet reconnect handling", "Manual emergency stop", "Trade execution confirmation check")
+        safety = @("Duplicate dummy signal prevention", "API/browser failure handling", "Internet reconnect handling", "Manual emergency stop", "Dummy signal confirmation check", "Never place/modify/cancel real broker orders")
         alerts = @("Trade entry", "Trade exit", "SL hit", "Target hit", "Session limit reached", "Daily trade limit reached", "API/order failure")
         logging = @("Entry time", "Exit time", "Direction (CE/PE)", "Strike selected", "Lot quantity", "Entry price", "Exit price", "P&L", "Exit reason", "Trade duration")
-        flow = @("15m EMA Direction Check", "Determine CE or PE Bias", "Select ATM Option Premium", "Monitor 3m EMA Crossover", "Validate: Session timing, Trade count, No active trade", "Deploy 100% available capital", "Execute Buy Order", "Monitor: Target, 20 EMA SL, Hard SL", "Exit Trade", "Update Logs & Trade Count", "Wait For Fresh Signal")
+        flow = @("15m EMA Direction Check", "Determine CE or PE Bias", "Select ATM Option Premium", "Monitor 3m EMA Crossover", "Validate: Session timing, Trade count, No active trade", "Calculate dummy deployment using 100% available capital", "Record Dummy Buy Signal (No Real Order)", "Monitor: Target, 20 EMA SL, Hard SL", "Record Dummy Exit Signal (No Real Order)", "Update Logs & Trade Count", "Wait For Fresh Signal")
     } | ConvertTo-Json -Depth 5 | Set-Content $strategyConfig -Encoding UTF8
     Ok "Strategy prompt saved to $strategyConfig"
 }

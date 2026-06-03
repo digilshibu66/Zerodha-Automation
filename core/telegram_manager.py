@@ -39,6 +39,29 @@ def send_message(message):
         logger.warning("Telegram send error: %s", e)
 
 
+def get_bot_username():
+    if not _load_config():
+        return None
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/getMe"
+    try:
+        r = requests.get(url, timeout=10)
+        if r.status_code != 200:
+            logger.warning("Telegram getMe failed (HTTP %d): %s", r.status_code, r.text[:200])
+            return None
+        data = r.json()
+        if not data.get("ok"):
+            logger.warning("Telegram getMe returned not ok: %s", data)
+            return None
+        username = (data.get("result") or {}).get("username")
+        return str(username) if username else None
+    except requests.RequestException as e:
+        logger.warning("Telegram getMe error: %s", e)
+        return None
+    except ValueError as e:
+        logger.warning("Telegram getMe invalid JSON: %s", e)
+        return None
+
+
 def _get_updates(offset=None, timeout=10):
     if not _load_config():
         return []
@@ -94,6 +117,8 @@ def poll_group_messages(offset=None, timeout=5):
         messages.append({
             "text": text,
             "from": name,
+            "is_bot": bool(sender.get("is_bot")),
+            "message_id": msg.get("message_id"),
             "date": msg.get("date", int(time.time())),
         })
     return next_offset, messages

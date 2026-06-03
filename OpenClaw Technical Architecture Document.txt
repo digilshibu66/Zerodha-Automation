@@ -7,7 +7,8 @@ Phase 2 Deliverable: Full Pipeline with OpenClaw Browser Automation & Simulation
 Build an automated OpenClaw-based intraday options monitoring and dummy trade simulation
 system for Zerodha. OpenClaw handles all browser automation (Chrome launch, login check,
 navigation). The strategy engine runs a Python loop for ongoing session-based monitoring
-and sends Telegram alerts for every event. All trades are simulated.
+and sends Telegram alerts for every event. All trades are simulated/dummy only.
+The bot must never place, modify, cancel, square off, or confirm real broker orders.
 
 2. Trading Strategy Definition
 15 Minute Chart Direction Logic:
@@ -50,7 +51,7 @@ Deliverable 2 - run.bat / run.sh -> run_bot.ps1 / run_bot.sh -> runtime.py
   * Sends Telegram login reminders/confirmation
   * Reads strategy prompt and monitors market
 - Once agent finishes -> start strategy engine loop:
-  * Every 60s check session windows (09:30-11:30, 13:00-15:00)
+  * Every 60s check session windows (09:30-11:30, 13:30-15:00)
   * Simulate 15m EMA direction -> CE/PE bias
   * Simulate 3m EMA crossover for entry
   * Track active positions with monitor cycles
@@ -105,11 +106,11 @@ runtime.py (pipeline orchestrator)
   |   |-- Every 60s:
   |   |   |-- Check daily trade limit (max 4)
   |   |   |-- Simulate 15m EMA direction (CE/PE random)
-  |   |   |-- Check session window (Morning 09:30-11:30 / Afternoon 13:00-15:00)
+  |   |   |-- Check session window (Morning 09:30-11:30 / Afternoon 13:30-15:00)
   |   |   |-- Check session trade limit (max 2 per session)
   |   |   |-- Simulate 3m EMA crossover for entry (random true/false)
   |   |   |-- If entry confirmed:
-  |   |   |   |-- Deploy 100% capital, ATM strike, 1-3 lots
+  |   |   |   |-- Calculate dummy deployment, ATM strike, 1-3 simulated lots
   |   |   |   |-- Telegram: "Trade entry: CE ATM | 2 lot(s) @ 145.50"
   |   |   |   |-- Monitor 3-6 cycles
   |   |   |   |-- Exit: target / SL / hard SL (random)
@@ -176,6 +177,19 @@ Two mandatory config settings that setup scripts enforce:
 telegram_manager.py loads config/telegram.json lazily (on first send_message call)
 with try/except error handling, so a missing or invalid config does not crash the bot.
 
+6f. OpenClaw Telegram outbox
+OpenClaw does not receive Telegram credentials and must not call Telegram sendMessage
+directly. When OpenClaw needs a user-facing status alert, it appends one line to
+prompts/openclaw_telegram_outbox.txt. The Python runtime watches this outbox, sends
+Telegram messages through telegram_manager.py, and suppresses repeated browser page
+read / Chrome DevTools warnings for the current bot start.
+
+6g. Browser-derived chart signals only
+The Python strategy monitor does not create random dummy entries or exits. OpenClaw
+must diagnose the browser charts and write prompts/chart_signal.json with the latest
+NIFTY 15m bias, CE/PE premium states, entry/exit confirmation, prices, and timestamp.
+Missing or stale chart_signal.json data is treated as waiting/no-entry.
+
 7. Telegram Notification Events
 - "Bot starting"
 - "Bot stopped"
@@ -187,6 +201,7 @@ with try/except error handling, so a missing or invalid config does not crash th
 - "Session limit reached: <Morning/Afternoon>"
 - "Daily trade limit reached"
 - Entry/exit session status updates
+- OpenClaw outbox status messages after Python dedupe/throttling
 
 8. Phase 2 Included
 - Full cross-platform setup (Windows + Linux)

@@ -3,7 +3,15 @@
   "chart": {
     "platform": "Upstox",
     "url": "https://pro.upstox.com/trading-charts",
-    "symbol": "NIFTY"
+    "symbol": "DYNAMIC_INDEX",
+    "index_display_name": "Target Index",
+    "index_timeframe": "15 min",
+    "option_strike": "ATM",
+    "option_timeframe": "3 min",
+    "option_targets": {
+      "CE": "Target Index ATM CE",
+      "PE": "Target Index ATM PE"
+    }
   },
   "direction": {
     "timeframe": "15 min",
@@ -14,32 +22,32 @@
     }
   },
   "strike_selection": {
-    "type": "ATM",
-    "rule": "If CE bias → Buy ATM CE; If PE bias → Buy ATM PE",
-    "note": "ATM strike dynamically updates based on current underlying spot price"
+    "type": "Dynamic ATM",
+    "rule": "Use the nearest ATM strike to the live Target Index spot LTP shown in the option chain. Use the current/nearest weekly expiry unless the user specifies otherwise. If CE bias → diagnose Target Index ATM CE for dummy entry; If PE bias → diagnose Target Index ATM PE for dummy entry",
+    "note": "Always inspect both Target Index ATM CE and Target Index ATM PE premium charts for the selected ATM strike, but only the 15m Target Index direction-approved side is eligible for dummy entry. If the ATM strike or expiry is unclear, ask the user via Telegram before selecting a different strike or expiry."
   },
   "entry": {
     "timeframe": "3 min",
-    "indicators": ["5 EMA", "20 EMA"],
+    "indicators": ["white line", "red line"],
     "conditions": {
-      "CE": ["15m direction = Bullish", "ATM CE premium 5 EMA crosses ABOVE 20 EMA", "Current time inside allowed session", "Trade count limit not exceeded", "No active position running"],
-      "PE": ["15m direction = Bearish", "ATM PE premium 5 EMA crosses BELOW 20 EMA", "Current time inside allowed session", "Trade count limit not exceeded", "No active position running"]
+      "CE": ["Target Index 15m direction = Bullish after fresh closed-candle crossover", "previous closed 3m candle 5 EMA <= 20 EMA and latest closed 3m candle 5 EMA > 20 EMA on the call chart", "Current time inside allowed session", "Trade count limit not exceeded", "No active position running"],
+      "PE": ["Target Index 15m direction = Bearish after fresh closed-candle crossover", "previous closed 3m candle 5 EMA <= 20 EMA and latest closed 3m candle 5 EMA > 20 EMA on the put chart", "Current time inside allowed session", "Trade count limit not exceeded", "No active position running"]
     }
   },
   "capital": { "usage": "100% of available capital per trade", "quantity": "Maximum possible lots using available margin, multiple lots allowed" },
   "risk_management": { "max_loss_per_trade": "10% of deployed capital", "example": "If capital = ₹20,000, max loss = ₹2,000" },
   "reward_target": { "min": "20% of deployed capital", "max": "50% of deployed capital", "configurable": true },
-  "stop_loss": { "type": "EMA based", "indicator": "20 EMA of 3-minute premium chart", "condition": "Exit if premium price touches/closes beyond 20 EMA against trade direction" },
+  "stop_loss": { "type": "Multi-condition", "indicator": "10% hard SL and dynamic SL", "condition": "Set a 10% hard stop loss, and also a Dynamic SL of 2 or 3 points lesser than the entry price. Exit if SL is hit." },
   "sessions": [
     { "name": "Morning", "start": "09:30", "end": "11:30", "max_trades": 2 },
-    { "name": "Afternoon", "start": "13:00", "end": "15:00", "max_trades": 2 }
+    { "name": "Afternoon", "start": "13:30", "end": "15:00", "max_trades": 2 }
   ],
   "daily_limit": { "max_trades": 4, "rule": "After 4 completed trades, block all new entries" },
   "exit_conditions": ["Profit target hit (20%-50% of deployed capital)", "EMA stop loss hit (price crosses 20 EMA on 3m premium chart)", "Hard risk stop hit (loss reaches 10% of deployed capital)"],
   "position_management": { "max_active": 1, "rules": ["Only ONE active trade at a time", "No averaging", "No hedging", "No reverse entry without fresh signal", "Wait for fresh EMA crossover after exit"] },
   "auto_square_off": { "time": "15:15", "rule": "Exit all open positions before market close" },
-  "safety": ["Duplicate order prevention", "API failure handling", "Internet reconnect handling", "Manual emergency stop", "Trade execution confirmation check"],
+  "safety": ["Duplicate dummy signal prevention", "API/browser failure handling", "Internet reconnect handling", "Manual emergency stop", "Dummy signal confirmation check", "Never place/modify/cancel real broker orders"],
   "alerts": ["Trade entry", "Trade exit", "SL hit", "Target hit", "Session limit reached", "Daily trade limit reached", "API/order failure"],
   "logging": ["Entry time", "Exit time", "Direction (CE/PE)", "Strike selected", "Lot quantity", "Entry price", "Exit price", "P&L", "Exit reason", "Trade duration"],
-  "flow": ["15m EMA Direction Check", "Determine CE or PE Bias", "Select ATM Option Premium", "Monitor 3m EMA Crossover", "Validate: Session timing, Trade count, No active trade", "Deploy 100% available capital", "Execute Buy Order", "Monitor: Target, 20 EMA SL, Hard SL", "Exit Trade", "Update Logs & Trade Count", "Wait For Fresh Signal"]
+  "flow": ["Open Target Index 15m chart on right pane", "Diagnose closed-candle crossover to determine Bullish or Bearish", "Click Target Index option chain icon in left sidebar", "Locate nearest ATM strike to live spot LTP in the current/nearest weekly expiry", "If Bearish select the ATM Put explicitly labeled PE; if Bullish select the ATM Call explicitly labeled CE", "Once call or put chart appears on the left, set 3-minute timeframe and monitor only fully closed candles", "Enter only when previous closed premium candle has 5 EMA <= 20 EMA and latest closed premium candle has 5 EMA > 20 EMA", "After bias is known, refresh the eligible premium chart every 5-10 seconds for current price, SL, and target checks; refresh the opposite side every 30-60 seconds for status only", "Set 10% hard SL, Dynamic SL of 2-3 points below entry, and 20-50% target", "Calculate dummy deployment using 100% available capital", "Record Dummy Buy Signal (No Real Order)", "Monitor: Target, 10% SL, Dynamic SL", "Record Dummy Exit Signal (No Real Order)", "Update Logs & Trade Count", "Wait For Fresh Signal"]
 }

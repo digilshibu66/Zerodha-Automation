@@ -9,3 +9,4 @@ prompts/
 .env
 config/telegram.json
 config/openclaw_model.json
+config/upstox_login.json
